@@ -46,6 +46,13 @@ snapshots the database over SFTP into a temp workspace, integrity-checks it,
 lists tables and reads rows — the end-to-end receipt for your own setup. It is
 read-only on the remote and refuses to run without `FLY_TARGET`.
 
+A wrong path fails loudly rather than registering nothing: `fly sftp get` exits 1
+with `remote path /data/x.db: file does not exist` and the server refuses to
+start. To find the right path first: `fly ssh console -a APP -C "ls -la /data"`.
+
+Last live run (2026-08-30, flyctl 0.4.95, 106 KB database, sjc): fetched in
+~2 s, `quick_check = ok`, 5 tables, rows browsable — all passed.
+
 ## Run it
 
 ```sh
