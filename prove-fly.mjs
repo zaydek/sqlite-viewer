@@ -46,6 +46,7 @@ if (failed) { console.log("\nstopping: fix the above first (`fly auth login`).")
 
 // 1. Start the server in REAL mode with a throwaway workspace.
 const WS = fs.mkdtempSync(path.join(os.tmpdir(), "sqlite-viewer-fly-"));
+process.on("exit", () => fs.rmSync(WS, { recursive: true, force: true })); // every exit path, including the early ones
 const port = await freePort();
 const child = spawn(process.execPath, ["--no-warnings", SERVER, "--port", String(port), "--workspace", WS, "--fly", target, "--fly-mode", "real"]);
 const out = [];
