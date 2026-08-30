@@ -1,0 +1,2786 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>sqlite-viewer</title>
+<script>
+// BEFORE THE FIRST PAINT, on purpose. The stylesheet's default is dark, so a
+// light-mode user whose theme is applied by the main script at the bottom of
+// <body> gets a black flash on every single page load. Six lines in <head>
+// costs nothing and removes it entirely.
+try {
+  var saved = localStorage.getItem("sqlite-viewer:theme");
+  document.documentElement.dataset.theme = saved === "light" ? "light" : "dark";
+} catch (e) {
+  document.documentElement.dataset.theme = "dark";  // private mode, no storage
+}
+</script>
+<style>
+/* ===========================================================================
+   SCHEMA-CONSOLE — the operator's view: plural, and now drawn.
+
+   The paint is sql-console-v2's, which is v1's: phosphor amber on near-black,
+   hairline rules, zero rounded corners, Menlo throughout. What is new is the
+   MAP — schema-viz-v2's layered diagram, repainted for this console and fed
+   from PRAGMA instead of from a text parser.
+
+   The map's palette follows the console's existing meanings rather than
+   importing schema-viz-v2's light-mode blues:
+     amber   what you are looking at now  (isolation, focus)
+     cyan    foreign keys at rest, and uploads
+     rose    broken things                (fk violations, removed in a diff)
+     green   good/new things              (added in a diff)
+     violet  schemas, and changed in a diff
+   =========================================================================== */
+
+/* ---------------------------------------------------------------------------
+   TWO PALETTES, ONE SET OF NAMES.
+   Every colour in this file is a token, so light mode is a second block of
+   values and not a second stylesheet. The MEANINGS are identical in both — only
+   the luminance moves:
+
+     amber   what you are looking at now   cyan    foreign keys, timestamps
+     rose    broken things                 green   good/new things
+     violet  schemas, and "changed"
+
+   The accents are not the same hex at two brightnesses. #ffb000 on white is
+   barely legible, so light mode uses genuinely darker pigments (#b45309 amber,
+   #0e7490 cyan) that carry the same meaning at a readable contrast. Anything
+   that was a bare hex — a hover, a sticky header, a note banner — became a token
+   here first; a hardcoded #14161a is invisible until somebody turns the lights
+   on and finds a black rectangle.
+
+   DEFAULT IS DARK, ALWAYS, and `prefers-color-scheme` is deliberately NOT
+   consulted. The setting is a setting: what you last chose, remembered, and
+   nothing else deciding for you. (To follow the OS instead, the one line to
+   change is `preferredTheme()` at the bottom of this file.)
+--------------------------------------------------------------------------- */
+:root, :root[data-theme="dark"] {
+  --bg:        #0a0b0d;
+  --bg-rail:   #0d0e11;
+  --bg-row:    #101215;
+  --line:      #1c1f26;
+  --line-hot:  #2a2f39;
+  --ink:       #c9cdd6;
+  --ink-dim:   #6b7280;
+  --ink-faint: #414753;
+  --amber:     #ffb000;
+  --amber-dim: #7a5400;
+  --cyan:      #4ec9d4;
+  --rose:      #ff6b7a;
+  --green:     #7ec97e;
+  --violet:    #b48ce8;
+
+  --edge:      #2f4a55;
+  --grid-dot:  #171b21;
+
+  /* surfaces that used to be bare hexes */
+  --hover:     #14161a;   /* a row under the pointer */
+  --selected:  #16181d;   /* the row you are on */
+  --kbd:       #1a1d23;
+  --head:      #0e1013;   /* sticky grid header, node header */
+  --cell-line: #131519;   /* grid cell hairlines, quieter than --line */
+  --focus-col: rgba(255, 176, 0, .05);
+  --focus-col-hot: rgba(255, 176, 0, .09);
+  --focus-row: #1d1a10;   /* the lit line in the DDL pane */
+  --note-bg:   #12100a;   /* the banner behind amber text */
+  --note-hot:  #1d1a10;
+  --panel:     #0c0d10;   /* query strip, map bar */
+  --veil:      rgba(6, 7, 9, .92);
+  --veil-hard: rgba(10, 11, 13, .9);
+  --sheet-shadow: none;   /* dark mode separates by contrast alone */
+  --drop-ink:  #ffb000;   /* always sits on a DARK scrim, in both themes */
+  --drop-sub:  #6b7280;
+  --toast-bg:  #101215;
+  --sel-bg:    #2f3644;   /* textarea selection */
+  --run-ink:   #14100a;   /* text ON the amber button */
+  --run-hot:   #ffc63d;
+  --number:    #e0a3ff;   /* SQL numeric literal */
+  --thumb:     #1e222a;
+  --thumb-hot: #2c313b;
+  --node-shadow: none;
+
+  --mono: Menlo, "SF Mono", monospace;
+  --rail: 246px;
+
+  --row-h:  21px;
+  --head-h: 26px;
+}
+
+:root[data-theme="light"] {
+  --bg:        #ffffff;
+  --bg-rail:   #f6f7f9;
+  --bg-row:    #ffffff;
+  --line:      #e3e7ed;
+  --line-hot:  #c4ccd7;
+  --ink:       #171a1f;
+  --ink-dim:   #5a626e;
+  --ink-faint: #8b939f;
+  --amber:     #b45309;
+  --amber-dim: #d9a441;
+  --cyan:      #0e7490;
+  --rose:      #be123c;
+  --green:     #15803d;
+  --violet:    #7c3aed;
+
+  --edge:      #94a3b8;
+  --grid-dot:  #e4e8ee;
+
+  --hover:     #eef1f5;
+  --selected:  #e7ecf3;
+  --kbd:       #eef1f5;
+  --head:      #f1f4f8;
+  --cell-line: #edf0f4;
+  --focus-col: rgba(180, 83, 9, .06);
+  --focus-col-hot: rgba(180, 83, 9, .11);
+  --focus-row: #fdf3e3;
+  --note-bg:   #fdf6e7;
+  --note-hot:  #f7ead0;
+  --panel:     #f8f9fb;
+  /* A pale scrim over a white page hides nothing and the sheet floating on it
+     has no edge. A modal dims — so light mode dims too, and the sheet lifts off
+     it with a shadow instead of with contrast it does not have. */
+  --veil:      rgba(23, 26, 31, .55);
+  --veil-hard: rgba(23, 26, 31, .72);
+  --sheet-shadow: 0 10px 44px rgba(15, 18, 23, .28);
+  --drop-ink:  #fbbf24;   /* lighter amber: the drop scrim is dark in both themes */
+  --drop-sub:  #cbd5e1;
+  --toast-bg:  #ffffff;
+  --sel-bg:    #cfe0ff;
+  --run-ink:   #ffffff;
+  --run-hot:   #92400e;
+  --number:    #7e22ce;
+  --thumb:     #ccd3dc;
+  --thumb-hot: #adb7c4;
+  /* Dark mode separates the map's nodes from the paper with contrast; on white
+     there is none to spare, so they get a real shadow instead. */
+  --node-shadow: 0 1px 2px rgba(23, 26, 31, .06), 0 6px 16px rgba(23, 26, 31, .07);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font: 12px/1.5 var(--mono);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+#app { display: grid; grid-template-columns: var(--rail) 1fr; height: 100%; }
+
+/* The map earns the whole window on demand. Collapsing the rail rather than
+   hiding the chrome keeps every control reachable — `w` puts it back. */
+#app[data-wide="1"] { grid-template-columns: 0 1fr; }
+#app[data-wide="1"] #rail { display: none; }
+
+/* ---------------------------------------------------------------- left rail */
+#rail {
+  background: var(--bg-rail);
+  border-right: 1px solid var(--line);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+
+.rail-head { border-bottom: 1px solid var(--line); }
+
+/* The picker button IS the header. Which database you are looking at is the
+   first question this has to answer on every screen, so it is the first thing. */
+#dbbutton {
+  display: block; width: 100%; text-align: left;
+  font: inherit; background: transparent; border: 0; cursor: pointer;
+  padding: 12px 14px 10px;
+}
+#dbbutton:hover { background: var(--hover); }
+#dbbutton .row1 { display: flex; align-items: baseline; gap: 8px; }
+.dbname {
+  color: var(--amber); font-size: 12px; font-weight: 600;
+  letter-spacing: .04em; text-transform: uppercase;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#dbbutton .chev { color: var(--ink-faint); font-size: 9px; margin-left: auto; }
+.dbmeta { color: var(--ink-faint); font-size: 10.5px; margin-top: 3px; letter-spacing: .03em; }
+
+/* kind badges — one colour per way a database got here, everywhere it appears */
+.kind {
+  font-size: 8.5px; letter-spacing: .14em; text-transform: uppercase;
+  border: 1px solid currentColor; padding: 0 3px; flex-shrink: 0;
+}
+.kind[data-k="file"]     { color: var(--amber); }
+.kind[data-k="upload"]   { color: var(--cyan); }
+.kind[data-k="schema"]   { color: var(--violet); }
+.kind[data-k="snapshot"] { color: var(--rose); }
+.kind[data-k="clone"]    { color: var(--green); }
+
+.rail-scroll { overflow-y: auto; flex: 1; padding-bottom: 20px; }
+
+.group {
+  color: var(--ink-faint); font-size: 9.5px; letter-spacing: .16em;
+  text-transform: uppercase; padding: 14px 14px 6px;
+}
+
+.obj {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 4px 14px; cursor: pointer;
+  border-left: 2px solid transparent;
+  color: var(--ink-dim);
+  white-space: nowrap;
+}
+.obj:hover { background: var(--hover); color: var(--ink); }
+.obj[data-on="1"] { background: var(--selected); color: var(--amber); border-left-color: var(--amber); }
+.obj .n  { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+.obj .c  { color: var(--ink-faint); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.obj[data-on="1"] .c { color: var(--amber-dim); }
+.obj[data-bad="1"] .n { color: var(--rose); text-decoration: line-through; }
+.obj[data-bad="1"] .c { color: var(--rose); }
+
+/* The caret is its own target — expanding the columns and opening the table are
+   two different intentions. It needs enough padding to be hittable without
+   aiming, or separating them just makes the caret impossible to press. */
+.obj .caret {
+  color: var(--ink-faint); font-size: 9px; flex-shrink: 0;
+  transition: transform .12s ease; display: inline-block;
+  width: 14px; margin: -4px 0 -4px -5px; padding: 4px 0 4px 5px;
+  text-align: left; cursor: pointer;
+}
+.obj .caret:hover { color: var(--amber); }
+.obj-wrap[data-open="1"] .caret { transform: rotate(90deg); color: var(--amber-dim); }
+.obj-wrap[data-open="1"] .caret:hover { color: var(--amber); }
+
+.cols { display: none; padding: 2px 0 6px; margin-left: 21px; border-left: 1px solid var(--line); }
+.obj-wrap[data-open="1"] .cols { display: block; }
+
+.col {
+  display: flex; align-items: baseline; gap: 10px;
+  padding: 2px 14px 2px 11px; cursor: pointer; white-space: nowrap;
+}
+.col:hover { background: var(--hover); }
+.col[data-on="1"] { background: var(--selected); }
+.col[data-on="1"] .cn { color: var(--amber); }
+.col .cn { flex: 1; color: var(--ink-dim); overflow: hidden; text-overflow: ellipsis; }
+.col .ck {
+  font-size: 9px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--ink-faint); cursor: pointer; padding: 0 2px;
+}
+.col .ck:hover { color: var(--amber); background: var(--kbd); }
+.col .ck[data-k="timestamp"] { color: var(--cyan); }
+.col .ck[data-k="id"]        { color: var(--ink-faint); }
+.col .ck[data-k="bool"]      { color: var(--green); }
+.col .ck[data-k="json"]      { color: var(--violet); }
+.col .ck[data-k="blob"]      { color: var(--ink-faint); }
+.col .ck[data-k="number"]    { color: var(--ink-dim); }
+
+/* ---------------------------------------------------------------- main area */
+#main { display: flex; flex-direction: column; overflow: hidden; position: relative; }
+
+#bar {
+  display: flex; align-items: stretch; gap: 0;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-rail);
+  flex-shrink: 0;
+}
+#bar .tab {
+  padding: 9px 16px; cursor: pointer; color: var(--ink-faint);
+  border-right: 1px solid var(--line);
+  letter-spacing: .05em; text-transform: uppercase; font-size: 10.5px;
+}
+#bar .tab:hover { color: var(--ink); }
+#bar .tab[data-on="1"] { color: var(--amber); background: var(--bg); }
+#bar .spacer { flex: 1; }
+#bar .hint { padding: 9px 14px; color: var(--ink-faint); font-size: 10.5px; }
+#bar .act {
+  font: inherit; background: transparent; border: 0; border-left: 1px solid var(--line);
+  color: var(--ink-dim); padding: 9px 14px; cursor: pointer;
+  letter-spacing: .05em; text-transform: uppercase; font-size: 10.5px;
+}
+#bar .act:hover { color: var(--amber); }
+kbd {
+  font: inherit; border: 1px solid var(--line-hot); padding: 0 4px;
+  color: var(--ink-dim); background: var(--hover);
+}
+
+/* A banner for anything about the database that the grid cannot say: a snapshot
+   is a moment not a feed, a schema has no rows because nothing has written any,
+   a build failed. Never hidden behind a tooltip. */
+#note {
+  display: none; flex-shrink: 0; padding: 7px 14px; font-size: 10.5px;
+  border-bottom: 1px solid var(--line); background: var(--note-bg); color: var(--amber);
+  align-items: center; gap: 12px;
+}
+#note[data-on="1"] { display: flex; }
+#note .spacer { flex: 1; }
+#note button {
+  font: inherit; background: transparent; border: 1px solid var(--amber-dim);
+  color: var(--amber); padding: 1px 9px; cursor: pointer; font-size: 10px;
+  letter-spacing: .06em; text-transform: uppercase;
+}
+#note button:hover { background: var(--note-hot); }
+
+/* query strip */
+#q { display: none; border-bottom: 1px solid var(--line); background: var(--panel); flex-shrink: 0; }
+#q[data-on="1"] { display: block; }
+#qwrap { position: relative; }
+#q textarea, #sqlhl {
+  font: 12px/1.6 var(--mono); padding: 12px 14px; margin: 0;
+  white-space: pre-wrap; word-break: break-word; letter-spacing: normal;
+}
+#sqlhl { position: absolute; inset: 0; overflow: hidden; pointer-events: none; color: var(--ink); }
+#q textarea {
+  position: relative; display: block; width: 100%; background: transparent;
+  border: 0; resize: vertical; min-height: 76px; outline: none;
+  color: transparent; caret-color: var(--amber);
+}
+#q textarea::placeholder { color: var(--ink-faint); }
+#q textarea::selection { background: var(--sel-bg); color: transparent; }
+#q .qbar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 6px 14px 8px; border-top: 1px solid var(--line);
+  color: var(--ink-faint); font-size: 10.5px;
+}
+button.run {
+  font: inherit; background: var(--amber); color: var(--run-ink); border: 0;
+  padding: 3px 12px; cursor: pointer; font-weight: 600;
+  letter-spacing: .05em; text-transform: uppercase;
+}
+button.run:hover { background: var(--run-hot); }
+
+/* ---------------------------------------------------------------- the grid */
+#scroll { flex: 1; overflow: auto; }
+
+table { border-collapse: collapse; width: max-content; min-width: 100%; }
+
+thead th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--head); text-align: left;
+  padding: 7px 12px; border-bottom: 1px solid var(--line-hot);
+  border-right: 1px solid var(--line);
+  color: var(--ink-dim); font-weight: 500;
+  white-space: nowrap; cursor: pointer; letter-spacing: .04em;
+}
+thead th:hover { color: var(--amber); }
+thead th .k {
+  color: var(--ink-faint); font-size: 9px; letter-spacing: .1em;
+  text-transform: uppercase; margin-left: 7px;
+}
+thead th .arrow { color: var(--amber); margin-left: 5px; }
+
+tbody td {
+  padding: 5px 12px; border-bottom: 1px solid var(--cell-line);
+  border-right: 1px solid var(--cell-line);
+  white-space: nowrap; max-width: 460px; overflow: hidden; text-overflow: ellipsis;
+}
+tbody tr:hover td { background: var(--bg-row); }
+
+thead th[data-focus="1"] { color: var(--amber); background: var(--selected); box-shadow: inset 0 2px 0 var(--amber); }
+tbody td[data-focus="1"] { background: var(--focus-col); }
+tbody tr:hover td[data-focus="1"] { background: var(--focus-col-hot); }
+
+/* value kinds — colour carries meaning, so a glance sorts the row */
+.v-timestamp { color: var(--cyan); font-variant-numeric: tabular-nums; }
+.v-timestamp .rel { color: var(--ink-faint); margin-left: 8px; font-size: 10.5px; }
+.v-number { color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+.v-id     { color: var(--ink-faint); }
+.v-bool   { color: var(--green); }
+.v-bool[data-f="0"] { color: var(--ink-faint); }
+.v-json   { color: var(--violet); }
+.v-blob   { color: var(--ink-faint); font-style: italic; }
+.v-null   { color: var(--ink-faint); font-style: italic; }
+.v-fk     { color: var(--amber); border-bottom: 1px dotted var(--amber-dim); cursor: pointer; }
+
+/* ---------------------------------------------------------------- status */
+#status {
+  display: flex; align-items: center; gap: 18px;
+  border-top: 1px solid var(--line); background: var(--bg-rail);
+  padding: 6px 14px; color: var(--ink-faint); font-size: 10.5px;
+  flex-shrink: 0; letter-spacing: .03em;
+}
+#status .live { color: var(--amber); }
+#status .err  { color: var(--rose); }
+#status .spacer { flex: 1; }
+#status button {
+  font: inherit; background: transparent; border: 1px solid var(--line-hot);
+  color: var(--ink-dim); padding: 1px 9px; cursor: pointer;
+}
+#status button:hover { border-color: var(--amber); color: var(--amber); }
+#status button:disabled { opacity: .3; cursor: default; }
+#status .gone { color: var(--rose); }
+#status [hidden] { display: none; }
+
+#st-refreshed {
+  color: var(--green); opacity: 0; transition: opacity .25s;
+  letter-spacing: .1em; text-transform: uppercase; font-size: 9.5px;
+}
+#st-refreshed[data-show="1"] { opacity: 1; }
+
+/* schema pane */
+#ddl { padding: 20px 24px; overflow: auto; display: none; }
+#ddl[data-on="1"] { display: block; }
+#ddl pre {
+  color: var(--ink-dim); font: 12px/1.7 var(--mono); white-space: pre-wrap;
+  border-left: 2px solid var(--line-hot); padding-left: 16px; margin-bottom: 22px;
+}
+#ddl h3 {
+  color: var(--amber); font-size: 10.5px; letter-spacing: .16em;
+  text-transform: uppercase; font-weight: 600; margin-bottom: 10px;
+}
+#ddl .ddl-error { color: var(--rose); border-left-color: var(--rose); }
+.ddl-line { display: inline-block; width: 100%; }
+.ddl-line[data-focus="1"] { background: var(--focus-row); box-shadow: inset 2px 0 0 var(--amber); }
+
+/* ---------------------------------------------------------- SQL palette */
+.s-keyword { color: var(--amber); }
+.s-type    { color: var(--cyan); }
+.s-string  { color: var(--green); }
+.s-ident   { color: var(--violet); }
+.s-number  { color: var(--number); }
+.s-comment { color: var(--ink-faint); font-style: italic; }
+.s-punct   { color: var(--ink-faint); }
+
+/* ============================================================ THE MAP
+   schema-viz-v2's layered drawing, repainted for this console and driven by
+   PRAGMA. Geometry, layering and edge routing are ported unchanged — those are
+   the parts that took the work. What is deleted is the parser that fed them. */
+#map { display: none; flex: 1; min-height: 0; flex-direction: column; }
+#map[data-on="1"] { display: flex; }
+
+#mapbar {
+  display: flex; align-items: center; gap: 14px; flex-shrink: 0;
+  padding: 6px 14px; border-bottom: 1px solid var(--line); background: var(--panel);
+  color: var(--ink-faint); font-size: 10.5px;
+}
+#mapbar .spacer { flex: 1; }
+#mapbar b { color: var(--ink-dim); font-weight: 600; font-variant-numeric: tabular-nums; }
+#mapbar button, #mapbar select {
+  font: inherit; font-size: 10.5px; background: transparent; border: 1px solid var(--line-hot);
+  color: var(--ink-dim); padding: 1px 8px; cursor: pointer;
+  letter-spacing: .05em; text-transform: uppercase;
+}
+#mapbar button:hover, #mapbar select:hover { border-color: var(--amber); color: var(--amber); }
+#mapbar select { text-transform: none; letter-spacing: 0; }
+#mapbar .bad { color: var(--rose); }
+
+#stage {
+  position: relative; flex: 1; min-height: 0; overflow: hidden; cursor: grab;
+  background-color: var(--bg);
+  background-image: radial-gradient(circle at 1px 1px, var(--grid-dot) 1px, transparent 0);
+  background-size: var(--grid-size, 24px) var(--grid-size, 24px);
+  background-position: var(--grid-x, 0) var(--grid-y, 0);
+}
+#stage.panning { cursor: grabbing; }
+
+#world { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
+#edges { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+
+.edge { fill: none; stroke: var(--edge); stroke-width: 1.25; }
+.edge.self { stroke-dasharray: 3 3; }
+.edge.violated { stroke: var(--rose); stroke-width: 2; }
+/* A 1px curve is impossible to click. An invisible fat twin over each edge is
+   the hit target — `pointer-events: stroke` means only the ribbon is live, not
+   the bounding box, so overlapping edges each stay clickable. */
+.edge-hit { fill: none; stroke: transparent; stroke-width: 14; pointer-events: stroke; cursor: pointer; }
+
+/* Isolation: one table's relationships light up, the rest recedes. */
+#stage.isolating .edge { stroke: var(--line); opacity: .4; }
+#stage.isolating .edge.lit { stroke: var(--amber); stroke-width: 1.9; opacity: 1; }
+#stage.isolating .node { opacity: .25; }
+#stage.isolating .node.lit, #stage.isolating .node.origin { opacity: 1; }
+.node.origin { border-color: var(--amber); box-shadow: 0 0 0 1px var(--amber); }
+
+.node {
+  position: absolute;
+  background: var(--bg-row);
+  border: 1px solid var(--line-hot);
+  box-shadow: var(--node-shadow);
+  font-family: var(--mono);
+  user-select: none;
+  overflow: hidden;
+}
+.node header {
+  height: var(--head-h);
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 8px;
+  background: var(--head);
+  border-bottom: 1px solid var(--line-hot);
+  cursor: grab;
+}
+.node header:active { cursor: grabbing; }
+.node h2 {
+  font-size: 11.5px; font-weight: 600; color: var(--ink);
+  white-space: nowrap; letter-spacing: .02em;
+}
+/* THE THING NO PARSER COULD SAY. A drawing that cannot tell a table holding
+   40,000 rows from one holding none is a drawing of the SQL, not of the
+   database. An empty table is stated in words, not left blank. */
+.node .rows {
+  margin-left: auto; font-size: 9.5px; color: var(--ink-faint);
+  font-variant-numeric: tabular-nums; letter-spacing: .04em;
+}
+.node[data-empty="1"] { border-style: dashed; }
+.node[data-empty="1"] header { background: transparent; }
+.node[data-empty="1"] .rows { color: var(--ink-faint); text-transform: uppercase; letter-spacing: .12em; font-size: 8.5px; }
+.node[data-type="view"] h2 { color: var(--violet); }
+
+.node .body { padding: 3px 0; }
+
+.row {
+  height: var(--row-h);
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 8px 0 5px;
+  font-size: 11px; line-height: 1; white-space: nowrap;
+  cursor: pointer;
+}
+.row:hover { background: var(--selected); }
+.mark { width: 10px; flex: none; text-align: center; font-size: 9px; color: var(--ink-faint); }
+.mark.pk { color: var(--amber); }
+.mark.fk { color: var(--cyan); }
+.cname { color: var(--ink); }
+.row.nullable .cname { color: var(--ink-dim); }
+.ctype { margin-left: auto; padding-left: 10px; font-size: 10px; color: var(--ink-faint); }
+
+/* Footer: indexes and lookup keys. An index predicate is schema, not trivia —
+   `unique(user_id)` and `unique(user_id) where revoked_at IS NULL` are
+   different rules and a viewer that prints both the same way is lying. */
+.foot {
+  border-top: 1px dashed var(--line-hot); padding: 4px 8px 5px;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.foot p {
+  font-size: 9.5px; line-height: 1.35; color: var(--ink-faint);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.foot .u { color: var(--ink-dim); }
+.foot .k { color: var(--green); }
+.foot .c { color: var(--cyan); }
+
+/* --- diff -------------------------------------------------------------- */
+#stage.diffing .node { opacity: .55; }
+#stage.diffing .node[data-state="added"],
+#stage.diffing .node[data-state="removed"],
+#stage.diffing .node[data-state="changed"] { opacity: 1; }
+.node[data-state="added"]   { border-color: var(--green); }
+.node[data-state="removed"] { border-color: var(--rose); border-style: dashed; opacity: .75; }
+.node[data-state="changed"] { border-color: var(--violet); }
+.node[data-state="added"]   h2 { color: var(--green); }
+.node[data-state="removed"] h2 { color: var(--rose); text-decoration: line-through; }
+.node[data-state="changed"] h2 { color: var(--violet); }
+.row[data-state="added"]   .cname { color: var(--green); }
+.row[data-state="removed"] .cname { color: var(--rose); text-decoration: line-through; }
+.row[data-state="changed"] .cname { color: var(--violet); }
+.row[data-state="added"]   .mark::after { content: "+"; }
+.row[data-state="removed"] .mark::after { content: "−"; }
+
+/* ============================================================ the picker */
+#picker {
+  display: none; position: absolute; inset: 0; z-index: 30;
+  background: var(--veil); padding: 40px;
+  overflow: auto;
+}
+#picker[data-on="1"] { display: block; }
+#picker .sheet {
+  max-width: 940px; margin: 0 auto;
+  border: 1px solid var(--line-hot); background: var(--bg-rail);
+  box-shadow: var(--sheet-shadow);
+}
+#picker h2 {
+  font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--amber); font-weight: 600; padding: 14px 18px; border-bottom: 1px solid var(--line);
+  display: flex; align-items: center; gap: 14px;
+}
+#picker h2 .spacer { flex: 1; }
+#picker h2 .where { color: var(--ink-faint); letter-spacing: .02em; text-transform: none; font-weight: 400; }
+
+.pick {
+  display: grid; grid-template-columns: 1fr auto; gap: 4px 16px;
+  padding: 11px 18px; border-bottom: 1px solid var(--line); cursor: pointer;
+}
+.pick:hover { background: var(--hover); }
+.pick[data-on="1"] { background: var(--selected); box-shadow: inset 3px 0 0 var(--amber); }
+.pick .top { grid-column: 1; grid-row: 1; display: flex; align-items: center; gap: 9px; }
+.pick .id { color: var(--ink); font-weight: 600; }
+.pick[data-on="1"] .id { color: var(--amber); }
+.pick .why { grid-column: 1; color: var(--ink-faint); font-size: 10.5px; }
+.pick .path { grid-column: 1; color: var(--ink-faint); font-size: 10px; opacity: .75; word-break: break-all; }
+.pick .acts { grid-column: 2; grid-row: 1 / span 3; display: flex; align-items: center; gap: 8px; }
+.pick .acts button {
+  font: inherit; font-size: 10px; background: transparent; border: 1px solid var(--line-hot);
+  color: var(--ink-dim); padding: 2px 8px; cursor: pointer; letter-spacing: .06em; text-transform: uppercase;
+}
+.pick .acts button:hover { border-color: var(--amber); color: var(--amber); }
+
+.state {
+  font-size: 8.5px; letter-spacing: .14em; text-transform: uppercase; padding: 0 4px;
+  border: 1px solid currentColor;
+}
+.state[data-s="ok"]    { color: var(--ink-faint); }
+.state[data-s="stale"] { color: var(--amber); }
+.state[data-s="gone"]  { color: var(--rose); }
+.state[data-s="error"] { color: var(--rose); }
+
+#picker .foot { padding: 14px 18px; color: var(--ink-faint); font-size: 10.5px; line-height: 1.7; }
+#picker .foot code { color: var(--ink-dim); }
+
+/* ============================================================ blocking states
+   A database that cannot be shown gets the whole pane and a full sentence. */
+#block { display: none; flex: 1; overflow: auto; padding: 56px 48px; }
+#block[data-on="1"] { display: block; }
+#block .title {
+  font-size: 13px; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--rose); font-weight: 600; margin-bottom: 18px;
+}
+#block[data-tone="calm"] .title { color: var(--amber); }
+#block p { max-width: 760px; color: var(--ink-dim); line-height: 1.9; margin-bottom: 14px; }
+#block dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 18px; margin: 20px 0 24px; max-width: 900px; }
+#block dt { color: var(--ink-faint); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; }
+#block dd { color: var(--ink); word-break: break-all; }
+#block .acts { display: flex; gap: 10px; margin-top: 8px; }
+#block .acts button {
+  font: inherit; background: transparent; border: 1px solid var(--line-hot);
+  color: var(--ink-dim); padding: 4px 14px; cursor: pointer;
+  letter-spacing: .06em; text-transform: uppercase; font-size: 10.5px;
+}
+#block .acts button:hover { border-color: var(--amber); color: var(--amber); }
+#block pre {
+  border-left: 2px solid var(--rose); padding: 4px 0 4px 16px; margin: 4px 0 22px;
+  color: var(--rose); white-space: pre-wrap; font: 12px/1.7 var(--mono); max-width: 900px;
+}
+
+/* ============================================================ paste sheet
+   GESTURE 1. Paste anywhere on the page and it builds; this sheet exists for
+   the times you want to look at the text before you commit to it. */
+#veil {
+  display: none; position: fixed; inset: 0; z-index: 55;
+  background: var(--veil); padding: 40px;
+  place-items: center;
+}
+#veil[data-on="1"] { display: grid; }
+#sheet {
+  width: min(820px, 100%); max-height: 100%; overflow: auto;
+  border: 1px solid var(--line-hot); background: var(--bg-rail);
+  box-shadow: var(--sheet-shadow);
+  display: flex; flex-direction: column;
+}
+#sheet h2 {
+  font-size: 10.5px; letter-spacing: .18em; text-transform: uppercase;
+  color: var(--amber); font-weight: 600; padding: 14px 18px; border-bottom: 1px solid var(--line);
+}
+#sheet .lede { padding: 12px 18px; color: var(--ink-faint); font-size: 10.5px; line-height: 1.8; }
+#sheet .lede b { color: var(--ink-dim); font-weight: 600; }
+#sheet textarea {
+  font: 12px/1.6 var(--mono); background: var(--bg); color: var(--ink);
+  border: 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  padding: 12px 18px; min-height: 260px; resize: vertical; outline: none;
+}
+#sheet textarea::placeholder { color: var(--ink-faint); }
+#sheet .acts { display: flex; align-items: center; gap: 12px; padding: 10px 18px; }
+#sheet .acts .spacer { flex: 1; }
+#sheet .acts button {
+  font: inherit; background: transparent; border: 1px solid var(--line-hot);
+  color: var(--ink-dim); padding: 3px 12px; cursor: pointer;
+  letter-spacing: .06em; text-transform: uppercase; font-size: 10.5px;
+}
+#sheet .acts button:hover { border-color: var(--amber); color: var(--amber); }
+#sheet .acts button.go { background: var(--amber); color: var(--run-ink); border-color: var(--amber); font-weight: 600; }
+#sheet .acts button.go:hover { background: var(--run-hot); }
+#pasteerr { color: var(--rose); font-size: 10.5px; }
+
+/* ============================================================ the drop target */
+#drop {
+  display: none; position: fixed; inset: 0; z-index: 60;
+  background: var(--veil-hard);
+  align-items: center; justify-content: center;
+}
+#drop[data-on="1"] { display: flex; }
+#drop .inner {
+  border: 2px dashed var(--drop-ink); padding: 64px 92px; text-align: center;
+  color: var(--drop-ink); letter-spacing: .1em; text-transform: uppercase; font-size: 14px;
+}
+#drop .inner small {
+  display: block; margin-top: 12px; color: var(--drop-sub);
+  letter-spacing: .04em; text-transform: none; font-size: 11px; line-height: 1.8;
+}
+
+#toast {
+  position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+  z-index: 70; padding: 8px 18px; border: 1px solid var(--line-hot);
+  background: var(--toast-bg); color: var(--ink); font-size: 11px; max-width: 80vw;
+  box-shadow: var(--sheet-shadow);
+  opacity: 0; transition: opacity .2s; pointer-events: none;
+}
+#toast[data-on="1"] { opacity: 1; }
+#toast[data-bad="1"] { border-color: var(--rose); color: var(--rose); }
+
+::-webkit-scrollbar { width: 11px; height: 11px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--thumb); border: 3px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--thumb-hot); }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <aside id="rail">
+    <div class="rail-head">
+      <button id="dbbutton" title="every database this console can reach (d)">
+        <span class="row1">
+          <span class="dbname" id="dbname">—</span>
+          <span class="kind" id="dbkind" data-k="file" hidden></span>
+          <span class="chev">▾</span>
+        </span>
+        <span class="dbmeta" id="dbmeta"></span>
+      </button>
+    </div>
+    <div class="rail-scroll" id="objects"></div>
+  </aside>
+
+  <main id="main">
+    <div id="bar">
+      <div class="tab" data-view="data" data-on="1">data</div>
+      <div class="tab" data-view="ddl">schema</div>
+      <div class="tab" data-view="map">map</div>
+      <div class="tab" data-view="query">query</div>
+      <div class="spacer"></div>
+      <button class="act" id="pastebtn" title="paste a schema and build a database from it (p)">paste sql</button>
+      <button class="act" id="theme" title="switch between light and dark (t)"></button>
+      <div class="hint"><kbd>d</kbd> databases &nbsp; <kbd>m</kbd> map &nbsp; <kbd>/</kbd> query &nbsp; <kbd>t</kbd> theme &nbsp; <kbd>esc</kbd> back</div>
+    </div>
+
+    <div id="note"><span id="note-text"></span><span class="spacer"></span><span id="note-acts"></span></div>
+
+    <div id="q">
+      <div id="qwrap">
+        <pre id="sqlhl" aria-hidden="true"></pre>
+        <textarea id="sql" name="sql" aria-label="SQL query" spellcheck="false"
+          placeholder="SELECT email, created_at FROM users ORDER BY created_at DESC LIMIT 50"></textarea>
+      </div>
+      <div class="qbar">
+        <button class="run" id="run">run</button>
+        <span><kbd>⌘</kbd><kbd>↵</kbd> execute</span>
+        <span id="qmsg"></span>
+      </div>
+    </div>
+
+    <div id="scroll"><table id="grid"><thead></thead><tbody></tbody></table></div>
+    <div id="ddl"></div>
+
+    <div id="map">
+      <div id="mapbar">
+        <span id="mapcounts"></span>
+        <span id="mapfk"></span>
+        <span class="spacer"></span>
+        <label for="cmp" style="letter-spacing:.05em;text-transform:uppercase">diff vs</label>
+        <select id="cmp" title="draw this schema against another one"></select>
+        <button id="check" title="PRAGMA foreign_key_check — orphan rows, drawn on the edge they broke">check fks</button>
+        <button id="fit" title="fit the drawing to the pane (f)">fit</button>
+        <button id="wide" title="give the map the whole window (w)">wide</button>
+      </div>
+      <div id="stage">
+        <div id="world">
+          <svg id="edges"></svg>
+          <div id="nodes"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="block"></div>
+
+    <div id="status">
+      <span id="st-name">—</span>
+      <span id="st-rows"></span>
+      <span id="st-time" class="live"></span>
+      <span id="st-refreshed">updated</span>
+      <span id="st-gone" class="gone" hidden></span>
+      <span class="spacer"></span>
+      <button id="download" title="a consistent copy via the SQLite online backup API">download .db</button>
+      <button id="clone" title="fork this database to a scratch copy and switch to it">clone</button>
+      <button id="prev">◀ prev</button>
+      <span id="st-page"></span>
+      <button id="next">next ▶</button>
+    </div>
+
+    <div id="picker"><div class="sheet"></div></div>
+  </main>
+</div>
+
+<div id="veil">
+  <div id="sheet">
+    <h2>paste a schema</h2>
+    <p class="lede">
+      SQLite runs this, and the map is drawn from <b>PRAGMA table_info</b> and
+      <b>PRAGMA foreign_key_list</b> against the database it built — not from reading the
+      text. If SQLite will not accept it, you get the engine's own error and the statement
+      it choked on, never a guessed picture.
+    </p>
+    <textarea id="pastesql" spellcheck="false" placeholder="CREATE TABLE users (
+  id    INTEGER PRIMARY KEY,
+  email TEXT NOT NULL
+);"></textarea>
+    <div class="acts">
+      <button class="go" id="pastego">build &amp; draw</button>
+      <span id="pasteerr"></span>
+      <span class="spacer"></span>
+      <button id="pastecancel">cancel</button>
+    </div>
+  </div>
+</div>
+
+<div id="drop"><div class="inner">drop it<small>a <b>.db</b> opens &middot; a <b>.sql</b> becomes a database<br />a <b>folder</b> of .sql is applied in filename order</small></div></div>
+<div id="toast"></div>
+
+<script>
+// ===========================================================================
+// State
+//
+// S.id — which database is being looked at. It comes from ?db= in the URL, it
+// goes back into the URL on every switch, and every single fetch carries it.
+// S.map — the drawing. Built lazily, because a console that computes a layered
+// layout on every poll for a tab nobody opened is a console that heats a laptop.
+// ===========================================================================
+const S = {
+  id: null,
+  dbs: [],
+  workspace: null,
+  schema: null,
+  table: null,
+  view: "data",          // data | ddl | map | query
+  offset: 0,
+  limit: 100,
+  orderBy: null,
+  dir: "ASC",
+  columns: [],
+  rows: [],
+  count: 0,
+  expanded: new Set(),
+  focusColumn: null,
+  blocked: false,
+  compareWith: null,     // the id the map is being diffed against, if any
+};
+
+const $ = (sel) => document.querySelector(sel);
+const el = (tag, cls) => { const n = document.createElement(tag); if (cls) n.className = cls; return n; };
+const entryOf = (id) => S.dbs.find((d) => d.id === id) ?? null;
+const plural = (n, one, many) => `${n.toLocaleString()} ${n === 1 ? one : many}`;
+
+/** Every API call names its database. There is no ambient "current database" on the server. */
+const withDb = (path) => path + (path.includes("?") ? "&" : "?") + "db=" + encodeURIComponent(S.id);
+
+/** Quote an identifier for generated SQL. Doubling embedded quotes is the whole job. */
+const qi = (name) => `"${String(name).replaceAll('"', '""')}"`;
+
+function toast(message, bad = false) {
+  const node = $("#toast");
+  node.textContent = message;
+  node.dataset.bad = bad ? "1" : "0";
+  node.dataset.on = "1";
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { node.dataset.on = "0"; }, bad ? 6000 : 2600);
+}
+
+// ===========================================================================
+// Value rendering — v1's, unchanged. The server said what each column MEANS;
+// this turns meaning into pixels.
+// ===========================================================================
+const pad = (n) => String(n).padStart(2, "0");
+
+function relative(seconds) {
+  const delta = Date.now() / 1000 - seconds;
+  const future = delta < 0;
+  const a = Math.abs(delta);
+  const unit =
+    a < 60      ? [a, "s"] :
+    a < 3600    ? [a / 60, "m"] :
+    a < 86400   ? [a / 3600, "h"] :
+    a < 2592000 ? [a / 86400, "d"] :
+                  [a / 2592000, "mo"];
+  return (future ? "in " : "") + Math.round(unit[0]) + unit[1] + (future ? "" : " ago");
+}
+
+const clock = (seconds) => {
+  const d = new Date(seconds * 1000);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+function renderValue(value, kind, column) {
+  const cell = el("span");
+
+  if (value === null || value === undefined) {
+    cell.className = "v-null";
+    cell.textContent = "null";
+    return cell;
+  }
+
+  switch (kind) {
+    case "timestamp": {
+      cell.className = "v-timestamp";
+      cell.textContent = clock(value);
+      const rel = el("span", "rel");
+      rel.textContent = relative(value);
+      cell.appendChild(rel);
+      cell.title = new Date(value * 1000).toString() + `  (raw ${value})`;
+      return cell;
+    }
+    case "number":
+      cell.className = "v-number";
+      cell.textContent = typeof value === "number" ? value.toLocaleString() : value;
+      return cell;
+    case "bool":
+      cell.className = "v-bool";
+      cell.dataset.f = value ? "1" : "0";
+      cell.textContent = value ? "true" : "false";
+      return cell;
+    case "json":
+      cell.className = "v-json";
+      try { cell.textContent = JSON.stringify(JSON.parse(value)); }
+      catch { cell.textContent = value; }
+      cell.title = value;
+      return cell;
+    case "blob":
+      cell.className = "v-blob";
+      cell.textContent = String(value);
+      cell.title = String(value);
+      return cell;
+    case "id":
+      cell.className = column?.references ? "v-fk" : "v-id";
+      cell.textContent = String(value);
+      cell.title = String(value);
+      if (column?.references) {
+        cell.title = `→ ${column.references.table}.${column.references.to}`;
+        cell.onclick = () => load(column.references.table);
+      }
+      return cell;
+    default:
+      cell.textContent = String(value);
+      cell.title = String(value);
+      return cell;
+  }
+}
+
+// ===========================================================================
+// The registry
+// ===========================================================================
+async function loadDbs() {
+  const data = await (await fetch("/api/dbs")).json();
+  S.dbs = data.databases;
+  S.workspace = data.workspace;
+  S.manifest = data.manifest;
+  S.defaultId = data.default;
+  return data;
+}
+
+function renderPicker() {
+  const sheet = $("#picker .sheet");
+  sheet.innerHTML = "";
+
+  const head = el("h2");
+  head.append(document.createTextNode(`databases · ${S.dbs.length}`));
+  const spacer = el("span", "spacer"); head.appendChild(spacer);
+  const where = el("span", "where"); where.textContent = S.workspace ?? ""; head.appendChild(where);
+  sheet.appendChild(head);
+
+  for (const entry of S.dbs) {
+    const row = el("div", "pick");
+    row.dataset.on = entry.id === S.id ? "1" : "0";
+
+    const top = el("div", "top");
+    const id = el("span", "id"); id.textContent = entry.id;
+    const kind = el("span", "kind"); kind.dataset.k = entry.kind; kind.textContent = entry.kind;
+    const state = el("span", "state"); state.dataset.s = entry.status; state.textContent = entry.status;
+    top.append(id, kind, state);
+
+    const why = el("div", "why");
+    why.textContent = describeEntry(entry);
+    const where2 = el("div", "path");
+    where2.textContent = entry.kind === "schema" ? `${entry.sourcePath}  →  ${entry.path}` : entry.path;
+
+    const acts = el("div", "acts");
+    const forget = el("button");
+    forget.textContent = "forget";
+    forget.title = "remove from this list — never deletes the file";
+    forget.onclick = async (event) => {
+      event.stopPropagation();
+      const answer = await (await fetch(`/api/db/${encodeURIComponent(entry.id)}`, { method: "DELETE" })).json();
+      toast(`forgot ${answer.forgot} — file still at ${answer.fileStillAt}`);
+      await loadDbs();
+      renderPicker();
+      if (entry.id === S.id) switchTo(S.dbs[0]?.id ?? null);
+    };
+    acts.appendChild(forget);
+
+    if (entry.kind === "snapshot") {
+      const retake = el("button");
+      retake.textContent = "re-take";
+      retake.title = "a snapshot never updates itself; this is the only way it moves";
+      retake.onclick = async (event) => {
+        event.stopPropagation();
+        await retakeSnapshot(entry.id);
+        renderPicker();
+      };
+      acts.appendChild(retake);
+    }
+
+    row.append(top, why, where2, acts);
+    row.onclick = () => { closePicker(); switchTo(entry.id); };
+    sheet.appendChild(row);
+  }
+
+  const foot = el("div", "foot");
+  foot.innerHTML =
+    `<div>Paste SQL anywhere on this page, or drop a <code>.db</code>, a <code>.sql</code>, or a <b>folder</b> of <code>.sql</code> files — no terminal.</div>` +
+    `<div>Every id above is a URL: <code>?db=&lt;id&gt;</code>, bookmarkable, and it survives a restart because the list lives in <code>${S.manifest ?? ""}</code>.</div>`;
+  sheet.appendChild(foot);
+}
+
+/** One sentence about how a database got into this list, and what it is worth. */
+function describeEntry(entry) {
+  const opened = `opened ${relative(entry.openedAt)}`;
+  switch (entry.kind) {
+    case "schema": {
+      if (entry.buildError) return `BUILD FAILED — ${entry.buildError}`;
+      // A directory-backed schema states the ORDER. It is the whole contract of
+      // a multi-file schema and it should never have to be inferred.
+      const how =
+        entry.sourceKind === "directory"
+          ? `${(entry.sourceFiles ?? []).map((f) => f.split("/").pop()).join(" → ")}`
+          : entry.sourcePath;
+      return `ephemeral · ${entry.statements} statements from ${how}, rebuilds when that changes · ${opened}`;
+    }
+    case "snapshot":
+      return `point-in-time copy of ${entry.fly.app}:${entry.fly.remotePath} via ${entry.fly.mode} · taken ${relative(entry.snapshot.takenAt)} · quick_check=${entry.snapshot.integrity} · never live`;
+    case "clone":
+      return `clone of ${entry.clone.of} taken ${relative(entry.clone.at)} · ${entry.clone.pages} pages via the backup API · ${opened}`;
+    case "upload":
+      return `${entry.origin} · ${opened}`;
+    default:
+      return `${entry.origin} · ${opened}`;
+  }
+}
+
+const openPicker = () => { renderPicker(); $("#picker").dataset.on = "1"; };
+const closePicker = () => { $("#picker").dataset.on = "0"; };
+
+/** The one function that changes which database you are looking at. */
+async function switchTo(id) {
+  if (!id) return renderEmpty();
+  S.id = id;
+  S.table = null;
+  S.offset = 0;
+  S.orderBy = null;
+  S.focusColumn = null;
+  S.expanded = new Set();
+  S.compareWith = null;
+  mapDirty = true;
+  watermark = null;
+  violations = [];
+  checkedFor = null;
+  stampUrl();
+  await openCurrent();
+}
+
+/**
+ * The URL is the identity, so it has to move with the state — and that is BOTH
+ * halves of it. `?db=` alone lost `&view=map` on every switch, which made "here
+ * is V7's map" an unsendable link.
+ *
+ * replaceState, not push: switching databases is not a navigation you want
+ * stacked in the back button ten deep after a minute of clicking around.
+ */
+function stampUrl() {
+  if (!S.id) return history.replaceState(null, "", location.pathname);
+  const query = new URLSearchParams({ db: S.id });
+  if (S.view && S.view !== "data") query.set("view", S.view);
+  if (S.compareWith) query.set("vs", S.compareWith);
+  history.replaceState(null, "", `?${query}`);
+}
+
+// ===========================================================================
+// Blocking states — the ones a grid cannot express.
+// ===========================================================================
+function block({ title, tone = "bad", lines = [], facts = {}, pre = null, actions = [] }) {
+  S.blocked = true;
+  const pane = $("#block");
+  pane.innerHTML = "";
+  pane.dataset.tone = tone;
+
+  const h = el("div", "title"); h.textContent = title; pane.appendChild(h);
+  for (const line of lines) { const p = el("p"); p.textContent = line; pane.appendChild(p); }
+  if (pre) { const block = el("pre"); block.textContent = pre; pane.appendChild(block); }
+
+  const keys = Object.keys(facts);
+  if (keys.length) {
+    const dl = el("dl");
+    for (const key of keys) {
+      const dt = el("dt"); dt.textContent = key;
+      const dd = el("dd"); dd.textContent = facts[key];
+      dl.append(dt, dd);
+    }
+    pane.appendChild(dl);
+  }
+
+  if (actions.length) {
+    const acts = el("div", "acts");
+    for (const action of actions) {
+      const button = el("button");
+      button.textContent = action.label;
+      button.onclick = action.run;
+      acts.appendChild(button);
+    }
+    pane.appendChild(acts);
+  }
+
+  pane.dataset.on = "1";
+  $("#scroll").style.display = "none";
+  $("#ddl").dataset.on = "0";
+  $("#map").dataset.on = "0";
+  $("#q").dataset.on = "0";
+  $("#note").dataset.on = "0";
+  for (const id of ["#download", "#clone", "#prev", "#next"]) $(id).disabled = true;
+}
+
+function unblock() {
+  if (!S.blocked) return;
+  S.blocked = false;
+  $("#block").dataset.on = "0";
+  $("#scroll").style.display = "block";
+  for (const id of ["#download", "#clone"]) $(id).disabled = false;
+}
+
+function renderEmpty() {
+  S.id = null;
+  history.replaceState(null, "", location.pathname);
+  $("#dbname").textContent = "no database";
+  $("#dbkind").hidden = true;
+  $("#dbmeta").textContent = `${S.dbs.length} in the registry`;
+  $("#objects").innerHTML = "";
+  block({
+    title: "nothing open",
+    tone:  "calm",
+    lines: [
+      "This console is not attached to a database. That is a state, not an error — it starts empty on purpose so that dropping a file is a complete workflow with no terminal in it.",
+      "Paste SQL anywhere on this page and it is compiled into a database and drawn. Drop a .db to browse it, a .sql to build one, or a whole folder of .sql files — those are applied in filename order, which is how a multi-file schema like one is meant to be read.",
+    ],
+    facts: { workspace: S.workspace ?? "—", registry: S.manifest ?? "—" },
+    actions: [
+      { label: "paste sql", run: openPasteSheet },
+      ...(S.dbs.length ? [{ label: "pick a database", run: openPicker }] : []),
+    ],
+  });
+}
+
+/** A registered id whose file is no longer reachable. */
+function renderGone(id, detail) {
+  const entry = entryOf(id) ?? {};
+  $("#dbname").textContent = id;
+  $("#objects").innerHTML = "";
+  block({
+    title: "410 · that database is gone",
+    lines: [
+      "This id is still in the registry, so the URL you followed was not wrong — the file behind it is not there any more.",
+      "Nothing was hidden and nothing was guessed: this console will not silently fall back to some other database because you bookmarked this one.",
+    ],
+    pre: detail,
+    facts: {
+      id,
+      kind:     entry.kind ?? "unknown",
+      path:     entry.kind === "schema" ? `${entry.sourcePath} → ${entry.path}` : (entry.path ?? "unknown"),
+      "opened": entry.openedAt ? `${clock(entry.openedAt)} (${relative(entry.openedAt)})` : "unknown",
+      "how":    entry.origin ?? "unknown",
+    },
+    actions: [
+      { label: "pick another", run: openPicker },
+      {
+        label: "forget it",
+        run:   async () => {
+          const answer = await (await fetch(`/api/db/${encodeURIComponent(id)}`, { method: "DELETE" })).json();
+          toast(`forgot ${answer.forgot}`);
+          await loadDbs();
+          switchTo(S.dbs[0]?.id ?? null);
+        },
+      },
+    ],
+  });
+}
+
+// ===========================================================================
+// Loading one database
+// ===========================================================================
+function renderNote() {
+  const entry = entryOf(S.id);
+  const note = $("#note");
+  const acts = $("#note-acts");
+  acts.innerHTML = "";
+  if (!entry) { note.dataset.on = "0"; return; }
+
+  let text = null;
+  if (entry.kind === "snapshot") {
+    text = `SNAPSHOT · taken ${clock(entry.snapshot.takenAt)} (${relative(entry.snapshot.takenAt)}) from ${entry.fly.app}:${entry.fly.remotePath} via ${entry.fly.mode} · point-in-time, never live · quick_check=${entry.snapshot.integrity}`;
+    const button = el("button");
+    button.textContent = "re-take";
+    button.onclick = () => retakeSnapshot(entry.id);
+    acts.appendChild(button);
+  } else if (entry.kind === "schema") {
+    // The build runs EVERY statement, so a schema carrying seed INSERTs for its
+    // lookup tables arrives with rows in them. Saying "no data" would be a lie
+    // you could see on the screen.
+    const source =
+      entry.sourceKind === "directory"
+        ? `${entry.sourcePath} — ${(entry.sourceFiles ?? []).length} files applied in filename order: ${(entry.sourceFiles ?? []).map((f) => f.split("/").pop()).join(" → ")}`
+        : entry.sourcePath;
+    text = `EPHEMERAL · built by running ${entry.statements} statements from ${source} (seed INSERTs included) · rebuilt whenever that changes · nothing in this console ever writes to it`;
+  } else if (entry.kind === "clone") {
+    text = `CLONE of ${entry.clone.of} · taken ${clock(entry.clone.at)} · a separate file; nothing you do here touches the original`;
+  } else if (entry.status === "stale") {
+    text = entry.detail;
+  }
+
+  note.dataset.on = text ? "1" : "0";
+  $("#note-text").textContent = text ?? "";
+}
+
+async function retakeSnapshot(id) {
+  toast("re-taking…");
+  const response = await fetch(`/api/snapshot/${encodeURIComponent(id)}/retake`, { method: "POST" });
+  const data = await response.json();
+  if (data.error) return toast(data.error, true);
+  await loadDbs();
+  renderNote();
+  toast(`re-taken · ${data.entry.snapshot.bytes} bytes · quick_check=${data.entry.snapshot.integrity}`);
+  if (id === S.id) await openCurrent();
+}
+
+function renderRail() {
+  const tables = S.schema.objects.filter((o) => o.type === "table");
+  const views  = S.schema.objects.filter((o) => o.type === "view");
+  const dated  = S.schema.objects.flatMap((o) => o.columns).filter((c) => c.kind === "timestamp").length;
+  const entry  = entryOf(S.id);
+
+  $("#dbname").textContent = S.schema.database;
+  $("#dbkind").hidden = false;
+  $("#dbkind").dataset.k = entry?.kind ?? "file";
+  $("#dbkind").textContent = entry?.kind ?? "";
+  $("#dbmeta").textContent =
+    `${tables.length} tables · ${views.length} views · ${dated} dated` +
+    (S.dbs.length > 1 ? `   —   ${S.dbs.length} databases` : "");
+
+  const list = $("#objects");
+  list.innerHTML = "";
+  const section = (label, items) => {
+    if (!items.length) return;
+    const h = el("div", "group"); h.textContent = label; list.appendChild(h);
+    for (const object of items) {
+      const wrap = el("div", "obj-wrap");
+      wrap.dataset.name = object.name;
+      wrap.dataset.open = S.expanded.has(object.name) ? "1" : "0";
+
+      const row = el("div", "obj");
+      row.dataset.name = object.name;
+      row.dataset.on = object.name === S.table ? "1" : "0";
+      const caret = el("span", "caret"); caret.textContent = "›";
+      const n = el("span", "n"); n.textContent = object.name;
+      const c = el("span", "c");
+      if (object.error) {
+        row.dataset.bad = "1";
+        row.title = object.error;
+        c.textContent = "err";
+      } else {
+        c.textContent = object.count.toLocaleString();
+      }
+      row.append(caret, n, c);
+
+      const cols = el("div", "cols");
+      for (const column of object.columns) {
+        const line = el("div", "col");
+        line.dataset.name = column.name;
+        const cn = el("span", "cn"); cn.textContent = column.name;
+        const ck = el("span", "ck"); ck.textContent = column.kind; ck.dataset.k = column.kind;
+        line.append(cn, ck);
+        line.title = `${column.type || "no declared type"}${column.primaryKey ? " · primary key" : ""}` +
+                     `${column.references ? ` · → ${column.references.table}.${column.references.to}` : ""}`;
+        line.onclick = (event) => { event.stopPropagation(); showColumn(object.name, column.name, "data"); };
+        ck.title = "show in schema";
+        ck.onclick = (event) => { event.stopPropagation(); showColumn(object.name, column.name, "ddl"); };
+        cols.appendChild(line);
+      }
+
+      // THE CARET AND THE NAME ARE TWO DIFFERENT QUESTIONS, so they are two
+      // different targets. One click used to both select the table AND collapse
+      // its columns, which meant you could not look at a table's rows without
+      // also losing the column list you were reading.
+      caret.onclick = (event) => {
+        event.stopPropagation();
+        const open = wrap.dataset.open === "1";
+        wrap.dataset.open = open ? "0" : "1";
+        if (open) S.expanded.delete(object.name);
+        else S.expanded.add(object.name);
+      };
+      caret.title = wrap.dataset.open === "1" ? "collapse the columns" : "expand the columns";
+      row.onclick = () => load(object.name);
+      row.title = `open ${object.name} in the grid — the caret expands its columns`;
+
+      wrap.append(row, cols);
+      list.appendChild(wrap);
+    }
+  };
+
+  section("tables", tables);
+  section("views", views);
+}
+
+/** Read the schema as it is now. Returns null and paints the reason if it cannot. */
+async function loadSchema() {
+  let response;
+  try {
+    response = await fetch(withDb("/api/schema"));
+  } catch {
+    return gone("server unreachable"), null;
+  }
+  const data = await response.json().catch(() => ({ error: "unreadable response" }));
+
+  if (response.status === 410 || data.gone) { renderGone(S.id, data.error); return null; }
+  if (data.empty) { renderEmpty(); return null; }
+  if (!response.ok || data.error) {
+    // A schema whose .sql does not compile lands here, and the SQLite error is
+    // the single most useful thing on the screen — so it gets the pane.
+    block({
+      title: "this schema will not build",
+      lines: [
+        "The registry still knows about it; SQLite will not give it to us.",
+        "Nothing is drawn from a schema that does not compile. A picture of SQL that SQLite rejects is worse than no picture — this is the engine's own message, and the file it happened in.",
+      ],
+      pre:   data.error,
+      facts: { id: S.id },
+      actions: [{ label: "paste something else", run: openPasteSheet }, { label: "pick another", run: openPicker }],
+    });
+    return null;
+  }
+
+  unblock();
+  present();
+  S.schema = data;
+  renderRail();
+  renderNote();
+  return data;
+}
+
+async function openCurrent() {
+  const schema = await loadSchema();
+  if (!schema) return;
+
+  mapDirty = true;
+  const tables = schema.objects.filter((o) => o.type === "table");
+  const opening = tables.find((o) => !o.error) ?? tables[0];
+  if (opening) await load(opening.name);
+  else {
+    $("#st-name").textContent = "—";
+    $("#st-rows").textContent = "no tables";
+  }
+  if (S.view === "map") await drawMap();
+  await poll();
+}
+
+async function boot() {
+  await loadDbs();
+  // Read the whole URL BEFORE anything touches it — switchTo() rewrites the
+  // query string, so reading `view` afterwards read a string we had just erased.
+  const url = new URLSearchParams(location.search);
+  const asked = url.get("db");
+  const wanted = url.get("view");
+  const versus = url.get("vs");
+
+  if (asked && !entryOf(asked)) {
+    block({
+      title: "404 · no such database id",
+      lines: [`This console has no database registered as "${asked}".`],
+      facts: { asked, registered: S.dbs.map((d) => d.id).join(", ") || "(none)" },
+      actions: [{ label: "pick a database", run: openPicker }],
+    });
+    S.id = asked;
+    setInterval(poll, POLL_MS);
+    return;
+  }
+
+  const id = asked ?? S.defaultId;
+  if (!id) { renderEmpty(); setInterval(poll, POLL_MS); return; }
+  await switchTo(id);
+
+  // ?view=map&vs=v6 is bookmarkable for the same reason ?db= is: "here is V7
+  // against V6" should be one link, not a link plus two keystrokes.
+  if (versus && entryOf(versus)) S.compareWith = versus;
+  if (wanted === "map" || wanted === "ddl" || wanted === "query") setView(wanted);
+  else stampUrl();
+
+  setInterval(poll, POLL_MS);
+}
+
+// ===========================================================================
+// Freshness — per database.
+//
+// IT JUST STAYS CURRENT. There is no refresh button. The fear behind a
+// "database changed · reload" button is losing your place, and the answer to
+// that is not a button, it is a refresh that DOESN'T lose your place.
+// ===========================================================================
+const POLL_MS = 2000;
+let watermark = null;
+let refreshing = false;
+
+const tokenOf = (v) => `${v.generation}:${v.identity}:${v.dataVersion}:${v.schemaVersion}`;
+
+function flashRefreshed() {
+  const badge = $("#st-refreshed");
+  badge.dataset.show = "1";
+  clearTimeout(flashRefreshed.timer);
+  flashRefreshed.timer = setTimeout(() => { badge.dataset.show = "0"; }, 1400);
+}
+
+function gone(message) { $("#st-gone").hidden = false; $("#st-gone").textContent = message; }
+function present() { $("#st-gone").hidden = true; }
+
+async function poll() {
+  if (!S.id) return;
+  let response;
+  try {
+    response = await fetch(withDb("/api/version"));
+  } catch {
+    return gone("server unreachable");
+  }
+  const body = await response.json().catch(() => ({}));
+
+  if (response.status === 410 || body.gone) {
+    await loadDbs();
+    return renderGone(S.id, body.error);
+  }
+  if (!response.ok) return gone(body.error || `server said ${response.status}`);
+
+  present();
+  if (S.blocked) { // it came back
+    await loadDbs();
+    await openCurrent();
+    return;
+  }
+
+  const token = tokenOf(body);
+  if (watermark === null) { watermark = token; return; }
+  if (token === watermark || refreshing) return;
+  await refresh();
+}
+
+async function refresh() {
+  refreshing = true;
+  try {
+    // Take the watermark BEFORE re-reading. If the database changes again while
+    // this reload is in flight, the next poll picks it up.
+    try { watermark = tokenOf(await (await fetch(withDb("/api/version"))).json()); } catch { /* poll reports it */ }
+
+    const schema = await loadSchema();
+    if (!schema) return;
+
+    // The map is the reason to keep a `--schema` open in another window: edit
+    // the .sql, watch the drawing change. So it redraws with the rest.
+    mapDirty = true;
+    if (S.view === "map") await drawMap();
+
+    if (S.view === "query") return flashRefreshed();
+
+    const survived = schema.objects.some((o) => o.name === S.table);
+    const tables = schema.objects.filter((o) => o.type === "table");
+    const fallback = tables.find((o) => !o.error) ?? tables[0];
+
+    const where = $("#scroll").scrollTop;
+    if (survived) await load(S.table, S.offset);
+    else if (fallback) await load(fallback.name);
+    else if (S.view !== "map") return fail("database has no tables");
+    $("#scroll").scrollTop = where;
+
+    flashRefreshed();
+  } finally {
+    refreshing = false;
+  }
+}
+
+async function load(name, offset = 0) {
+  S.table = name;
+  S.offset = offset;
+  S.focusColumn = null;
+  setView("data");
+
+  const params = new URLSearchParams({ limit: S.limit, offset });
+  if (S.orderBy) { params.set("orderBy", S.orderBy); params.set("dir", S.dir); }
+
+  const started = performance.now();
+  let response;
+  try {
+    response = await fetch(withDb(`/api/rows/${encodeURIComponent(name)}?${params}`));
+  } catch {
+    return gone("server unreachable");
+  }
+  const ms = performance.now() - started;
+  const data = await response.json().catch(() => ({ error: "unreadable response" }));
+
+  if (response.status === 410 || data.gone) return renderGone(S.id, data.error);
+  if (data.error) return fail(data.error);
+  unblock();
+  present();
+
+  S.columns = data.columns;
+  S.rows = data.rows;
+  S.count = data.count;
+
+  document.querySelectorAll(".obj").forEach((o) => { o.dataset.on = o.dataset.name === name ? "1" : "0"; });
+
+  draw();
+  $("#st-name").textContent = name;
+  $("#st-rows").textContent = `${data.count.toLocaleString()} rows`;
+  $("#st-time").textContent = `${ms.toFixed(1)} ms`;
+  $("#st-time").className = "live";
+  page();
+  drawDDL();
+}
+
+function draw() {
+  const head = $("#grid thead");
+  const body = $("#grid tbody");
+  head.innerHTML = "";
+  body.innerHTML = "";
+
+  const tr = el("tr");
+  for (const column of S.columns) {
+    const th = el("th");
+    if (column.name === S.focusColumn) th.dataset.focus = "1";
+    th.append(document.createTextNode(column.name));
+    const k = el("span", "k"); k.textContent = column.kind; th.appendChild(k);
+    if (S.orderBy === column.name) {
+      const a = el("span", "arrow"); a.textContent = S.dir === "ASC" ? "▲" : "▼";
+      th.appendChild(a);
+    }
+    th.onclick = () => {
+      S.dir = S.orderBy === column.name && S.dir === "ASC" ? "DESC" : "ASC";
+      S.orderBy = column.name;
+      load(S.table, 0);
+    };
+    tr.appendChild(th);
+  }
+  head.appendChild(tr);
+
+  const frag = document.createDocumentFragment();
+  for (const row of S.rows) {
+    const line = el("tr");
+    for (const column of S.columns) {
+      const td = el("td");
+      if (column.name === S.focusColumn) td.dataset.focus = "1";
+      td.appendChild(renderValue(row[column.name], column.kind, column));
+      line.appendChild(td);
+    }
+    frag.appendChild(line);
+  }
+  body.appendChild(frag);
+}
+
+// ===========================================================================
+// SQL syntax highlighting — v1's one-pass tokeniser, unchanged.
+// ===========================================================================
+const SQL_KEYWORDS = new Set(`
+  select from where group by having order limit offset union all distinct as on
+  join left right inner outer cross natural using insert into values update set
+  delete create table view index unique if not exists drop alter add column
+  primary key foreign references default check constraint autoincrement
+  begin commit rollback pragma explain with recursive case when then else end
+  and or in is null like glob between exists cast collate asc desc temp temporary
+  trigger before after instead of each row virtual generated always stored
+`.trim().split(/\s+/));
+
+const SQL_TYPES = new Set(["integer", "int", "text", "real", "blob", "numeric", "boolean", "date", "datetime", "varchar", "char", "decimal", "float", "double"]);
+
+const escapeHtml = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+
+function highlightSql(sql) {
+  const pattern = /(--[^\n]*|\/\*[\s\S]*?\*\/)|('(?:[^']|'')*'|"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[[^\]]*\])|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z_0-9$]*)|([(),;=<>!+\-*/|]+)/g;
+  let out = "";
+  let last = 0;
+  for (let m; (m = pattern.exec(sql)); ) {
+    out += escapeHtml(sql.slice(last, m.index));
+    const [text, comment, string, number, word, punct] = m;
+    if (comment) out += `<i class="s-comment">${escapeHtml(text)}</i>`;
+    else if (string) {
+      // A double-quoted or bracketed token is an IDENTIFIER in SQLite, not a
+      // string — colouring it as one would misrepresent `"weird name"`.
+      const isIdent = /^["`[]/.test(text);
+      out += `<i class="${isIdent ? "s-ident" : "s-string"}">${escapeHtml(text)}</i>`;
+    } else if (number) out += `<i class="s-number">${escapeHtml(text)}</i>`;
+    else if (word) {
+      const lower = text.toLowerCase();
+      const cls = SQL_KEYWORDS.has(lower) ? "s-keyword" : SQL_TYPES.has(lower) ? "s-type" : null;
+      out += cls ? `<i class="${cls}">${escapeHtml(text)}</i>` : escapeHtml(text);
+    } else out += `<i class="s-punct">${escapeHtml(text)}</i>`;
+    last = m.index + text.length;
+  }
+  return out + escapeHtml(sql.slice(last));
+}
+
+function ddlBlock(sql, focusColumn) {
+  const pre = el("pre");
+  const lines = (sql || "(no ddl)").split("\n");
+  for (const [i, line] of lines.entries()) {
+    const row = el("span", "ddl-line");
+    row.innerHTML = highlightSql(line);
+    if (focusColumn && new RegExp(`^\\s*"?${focusColumn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"?[\\s,)]`).test(line)) {
+      row.dataset.focus = "1";
+    }
+    pre.appendChild(row);
+    if (i < lines.length - 1) pre.appendChild(document.createTextNode("\n"));
+  }
+  return pre;
+}
+
+function drawDDL() {
+  const object = S.schema.objects.find((o) => o.name === S.table);
+  if (!object) return;
+  const pane = $("#ddl");
+  pane.innerHTML = "";
+
+  const h = el("h3"); h.textContent = object.type; pane.appendChild(h);
+  pane.appendChild(ddlBlock(object.sql, S.focusColumn));
+
+  if (object.error) {
+    const eh = el("h3"); eh.textContent = "error"; pane.appendChild(eh);
+    const epre = el("pre"); epre.className = "ddl-error"; epre.textContent = object.error;
+    pane.appendChild(epre);
+  }
+
+  const written = object.indexes.filter((i) => i.sql);
+  if (written.length) {
+    const ih = el("h3"); ih.textContent = "indexes"; pane.appendChild(ih);
+    pane.appendChild(ddlBlock(written.map((i) => i.sql + ";").join("\n"), S.focusColumn));
+  }
+
+  // Indexes with no CREATE statement of their own — a UNIQUE constraint builds
+  // a real index and the DDL pane used to be silent about it.
+  const implied = object.indexes.filter((i) => !i.sql);
+  if (implied.length) {
+    const ch = el("h3"); ch.textContent = "constraint indexes"; pane.appendChild(ch);
+    const pre = el("pre");
+    pre.textContent = implied
+      .map((i) => `-- ${i.name}\n${i.unique ? "UNIQUE " : ""}(${i.columns.join(", ")})   -- built by a constraint, no CREATE INDEX of its own`)
+      .join("\n\n");
+    pane.appendChild(pre);
+  }
+}
+
+/**
+ * A rail column has two targets, because it answers two different questions.
+ *   the NAME  -> "what is in it?"      -> the data, with that column lit
+ *   the KIND  -> "how is it declared?" -> the schema, with its line lit
+ */
+async function showColumn(table, column, view = "data") {
+  if (S.table !== table) await load(table);   // load() clears the focus, so set it after
+  S.focusColumn = column;
+  setView(view);
+  draw();
+  drawDDL();
+  document.querySelectorAll(".col").forEach((c) => {
+    c.dataset.on = c.dataset.name === column && c.closest(".obj-wrap")?.dataset.name === table ? "1" : "0";
+  });
+
+  if (view === "ddl") $("#ddl").querySelector('[data-focus="1"]')?.scrollIntoView({ block: "center" });
+  else $("#grid")?.querySelector('thead th[data-focus="1"]')?.scrollIntoView({ inline: "nearest", block: "nearest" });
+}
+
+function page() {
+  const from = S.offset + 1;
+  const to = Math.min(S.offset + S.limit, S.count);
+  $("#st-page").textContent = S.count ? `${from.toLocaleString()}–${to.toLocaleString()}` : "0";
+  $("#prev").disabled = S.offset === 0;
+  $("#next").disabled = S.offset + S.limit >= S.count;
+}
+
+function fail(message) {
+  $("#st-time").textContent = message;
+  $("#st-time").className = "err";
+}
+
+// ===========================================================================
+// THE MAP
+//
+// The layered drawing: the layered layout, the barycenter
+// sweeps, the single edgePath(), the direction-chosen anchors. Those took the
+// work and are kept exactly.
+//
+// WHAT IS NOT PORTED: the 400-line SQL parser that fed them. The model is built
+// from /api/schema, which is PRAGMA table_info + PRAGMA foreign_key_list run
+// inside one snapshot. The engine's own catalog cannot disagree with the
+// database; a text parser can, and silently.
+// ===========================================================================
+const GAP_X = 96;
+const GAP_Y = 26;
+const HEAD_H = 26;
+const ROW_H = 21;
+const ROWS_PAD = 6;
+const CH = 6.4;   // measured advance width of the 11px mono row text
+
+const stage = $("#stage");
+const world = $("#world");
+const svg = $("#edges");
+const nodes = $("#nodes");
+const NS = "http://www.w3.org/2000/svg";
+
+const camera = { x: 0, y: 0, k: 1 };
+let mapModel = null;
+let mapDirty = true;
+let violations = [];
+
+/** /api/schema's objects -> the shape the layout engine wants. */
+function toMapTables(objects) {
+  return objects.map((object) => ({
+    name:    object.name,
+    type:    object.type,
+    count:   object.count,
+    error:   object.error ?? null,
+    keys:    object.keys ?? [],
+    indexes: object.indexes ?? [],
+    columns: (object.columns ?? []).map((column) => ({
+      name:    column.name,
+      type:    column.type,
+      pk:      column.primaryKey,
+      notNull: column.notNull,
+      kind:    column.kind,
+      // `to` is null when the FK named no column — `REFERENCES users` binds to
+      // the parent's primary key. Resolved against the parent at draw time.
+      fk:      column.references ? { table: column.references.table, column: column.references.to } : null,
+    })),
+  }));
+}
+
+function measure(t) {
+  let width = 150;
+  for (const c of t.columns) {
+    const w = 14 + (c.name.length + 1) * CH + 10 + String(c.type || "").length * (CH * 0.92) + 18;
+    if (w > width) width = w;
+  }
+  const rowsLabel = t.count === 0 ? 5 : String(t.count.toLocaleString()).length + 5;
+  const title = 16 + t.name.length * 7 + rowsLabel * 6 + 24;
+  if (title > width) width = title;
+  width = Math.min(Math.max(Math.ceil(width), 176), 360);
+
+  const footLines = t.indexes.length + (t.keys.length ? 1 : 0);
+  const height = HEAD_H + ROWS_PAD + t.columns.length * ROW_H + (footLines ? 9 + footLines * 14 : 0);
+  return { width, height: Math.ceil(height) };
+}
+
+/**
+ * Layered left-to-right: a table sits one lane right of the deepest table it
+ * points at, so parents land left of children and the spine reads the way the
+ * product happens. Within a lane, barycenter sweeps pull each node toward the
+ * average height of what it connects to, which is what stops the edges turning
+ * into a hairball.
+ */
+function layout(tables) {
+  const byName = new Map(tables.map((t) => [t.name.toLowerCase(), t]));
+  for (const t of tables) Object.assign(t, measure(t));
+
+  // Layer = 1 + deepest parent. Cycles resolve to 0 for whichever node the walk
+  // re-enters, which is enough to keep the drawing sane.
+  const layerOf = new Map();
+  const walking = new Set();
+  function depth(t) {
+    const key = t.name.toLowerCase();
+    if (layerOf.has(key)) return layerOf.get(key);
+    if (walking.has(key)) return 0;
+    walking.add(key);
+    let best = 0;
+    for (const c of t.columns) {
+      if (!c.fk) continue;
+      const parent = byName.get(c.fk.table.toLowerCase());
+      if (!parent || parent === t) continue;
+      best = Math.max(best, depth(parent) + 1);
+    }
+    walking.delete(key);
+    layerOf.set(key, best);
+    return best;
+  }
+  for (const t of tables) depth(t);
+
+  const lanes = [];
+  for (const t of tables) {
+    const l = layerOf.get(t.name.toLowerCase());
+    (lanes[l] || (lanes[l] = [])).push(t);
+  }
+
+  let x = 0;
+  for (const lane of lanes) {
+    if (!lane) continue;
+    const widest = Math.max(...lane.map((t) => t.width));
+    for (const t of lane) t.x = x + (widest - t.width) / 2;
+    x += widest + GAP_X;
+  }
+
+  const stack = (lane) => {
+    let y = 0;
+    for (const t of lane) { t.y = y; y += t.height + GAP_Y; }
+    const half = (y - GAP_Y) / 2;
+    for (const t of lane) t.y -= half;
+  };
+  lanes.forEach((lane) => lane && stack(lane));
+
+  const center = (t) => t.y + t.height / 2;
+  const parentsOf = (t) =>
+    t.columns.filter((c) => c.fk).map((c) => byName.get(c.fk.table.toLowerCase())).filter((p) => p && p !== t);
+  const childrenOf = (t) => tables.filter((o) => o !== t && parentsOf(o).includes(t));
+
+  for (let pass = 0; pass < 10; pass++) {
+    const forward = pass % 2 === 0;
+    const order = forward ? lanes : [...lanes].reverse();
+    for (const lane of order) {
+      if (!lane) continue;
+      const key = new Map();
+      for (const t of lane) {
+        const kin = forward ? parentsOf(t) : childrenOf(t);
+        key.set(t, kin.length ? kin.reduce((a, k) => a + center(k), 0) / kin.length : center(t));
+      }
+      lane.sort((a, b) => key.get(a) - key.get(b));
+      stack(lane);
+    }
+  }
+
+  const minX = Math.min(...tables.map((t) => t.x));
+  const minY = Math.min(...tables.map((t) => t.y));
+  for (const t of tables) { t.x = t.x - minX + 40; t.y = t.y - minY + 40; }
+
+  return {
+    width:  Math.max(...tables.map((t) => t.x + t.width)) + 40,
+    height: Math.max(...tables.map((t) => t.y + t.height)) + 40,
+    byName,
+  };
+}
+
+function rowY(t, column) {
+  const i = t.columns.findIndex((c) => c.name === column);
+  const index = i < 0 ? 0 : i;
+  return t.y + HEAD_H + ROWS_PAD / 2 + index * ROW_H + ROW_H / 2;
+}
+
+/** The parent column an FK actually lands on. `REFERENCES users` names none — that means its primary key. */
+function targetColumnOf(parent, column) {
+  if (column?.fk?.column) return column.fk.column;
+  return (parent.columns.find((c) => c.pk) ?? parent.columns[0])?.name ?? "id";
+}
+
+/**
+ * ONE definition of an edge's geometry, used by both the first draw and every
+ * redraw after a node is dragged. Two copies of this drifted once already.
+ *
+ * Which side each end leaves from depends on which way the edge actually runs.
+ * A schema with a cycle puts a parent to the RIGHT of its child, and anchoring
+ * that to the parent's right edge sends the curve looping out past the canvas.
+ * Leaving from the near sides instead keeps every edge inside the span it
+ * connects.
+ */
+function edgePath(parent, child, columnName) {
+  const column = child.columns.find((c) => c.name === columnName);
+  const y2 = rowY(child, columnName);
+
+  if (parent === child) {
+    const y1 = rowY(child, targetColumnOf(child, column));
+    const x = child.x;
+    return `M ${x} ${y1} C ${x - 44} ${y1}, ${x - 44} ${y2}, ${x} ${y2}`;
+  }
+
+  const y1 = rowY(parent, targetColumnOf(parent, column));
+  const forward = parent.x + parent.width / 2 <= child.x + child.width / 2;
+  const x1 = forward ? parent.x + parent.width : parent.x;
+  const x2 = forward ? child.x : child.x + child.width;
+  const dir = forward ? 1 : -1;
+  const bow = Math.max(44, Math.abs(x2 - x1) * 0.4);
+
+  return `M ${x1} ${y1} C ${x1 + dir * bow} ${y1}, ${x2 - dir * bow} ${y2}, ${x2} ${y2}`;
+}
+
+async function drawMap() {
+  if (!S.schema) return;
+  if (!mapDirty && mapModel) { fit(); return; }
+
+  // Remember where nodes were dragged to, but ONLY when the drawing is
+  // otherwise identical. Keeping a hand-arranged layout across a poll is worth
+  // a lot; keeping it across a schema change would leave new tables piled at
+  // the origin next to a layout computed for a schema that no longer exists.
+  const held = new Map();
+  const previous = mapModel?.tables ?? [];
+  let tables = toMapTables(S.schema.objects);
+  const sameShape =
+    previous.length === tables.length &&
+    previous.every((t, i) => t.name === tables[i].name && t.columns.length === tables[i].columns.length);
+  if (sameShape) for (const t of previous) held.set(t.name, { x: t.x, y: t.y });
+
+  if (S.compareWith) {
+    const other = await fetchSchemaOf(S.compareWith);
+    if (other) tables = diffTables(tables, toMapTables(other.objects));
+    else S.compareWith = null;
+  }
+
+  if (!tables.length) {
+    nodes.textContent = "";
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    $("#mapcounts").textContent = "this database has no tables or views to draw";
+    mapModel = null;
+    mapDirty = false;
+    return;
+  }
+
+  const box = layout(tables);
+  if (held.size) {
+    for (const t of tables) {
+      const at = held.get(t.name);
+      if (at) { t.x = at.x; t.y = at.y; }
+    }
+  }
+  mapModel = { tables, box, edges: [] };
+
+  nodes.textContent = "";
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  svg.setAttribute("width", box.width);
+  svg.setAttribute("height", box.height);
+
+  // Edges first, so the nodes sit above them.
+  for (const t of tables) {
+    for (const c of t.columns) {
+      if (!c.fk) continue;
+      const parent = box.byName.get(c.fk.table.toLowerCase());
+      if (!parent) continue;
+
+      const d = edgePath(parent, t, c.name);
+      const path = document.createElementNS(NS, "path");
+      path.setAttribute("d", d);
+      path.classList.add("edge");
+      if (parent === t) path.classList.add("self");
+      svg.appendChild(path);
+
+      // The clickable twin. Appended after so it wins the hit test.
+      const hit = document.createElementNS(NS, "path");
+      hit.setAttribute("d", d);
+      hit.classList.add("edge-hit");
+      const to = targetColumnOf(parent, c);
+      hit.append(document.createElementNS(NS, "title"));
+      hit.firstChild.textContent = `${t.name}.${c.name} → ${parent.name}.${to}\nclick for the join`;
+      hit.addEventListener("click", () => joinFor(parent.name, to, t.name, c.name));
+      svg.appendChild(hit);
+
+      mapModel.edges.push({ el: path, hit, from: parent.name, to: t.name, column: c.name, parentColumn: to });
+    }
+  }
+
+  for (const t of tables) nodes.append(nodeFor(t));
+
+  paintCounts(tables);
+  applyViolations();
+  clearIsolation();
+  stage.classList.toggle("diffing", Boolean(S.compareWith));
+  mapDirty = false;
+  fit();
+  maybeAutoCheck(tables);
+}
+
+function nodeFor(t) {
+  const box = el("section", "node");
+  box.dataset.table = t.name;
+  box.dataset.type = t.type;
+  if (t.state) box.dataset.state = t.state;
+  if (t.count === 0 && !t.state) box.dataset.empty = "1";
+  box.style.left = t.x + "px";
+  box.style.top = t.y + "px";
+  box.style.width = t.width + "px";
+
+  const head = el("header");
+  const h2 = el("h2"); h2.textContent = t.name;
+  const rows = el("span", "rows");
+  // The row count is the whole reason this is drawn from a database and not
+  // from text. An empty table says so in words; a blank corner does not.
+  rows.textContent = t.removed ? `was ${plural(t.count, "row", "rows")}` : t.count === 0 ? "empty" : plural(t.count, "row", "rows");
+  head.append(h2, rows);
+
+  const body = el("div", "body");
+  for (const c of t.columns) {
+    const row = el("div", "row" + (c.notNull || c.pk ? "" : " nullable"));
+    row.dataset.column = c.name;
+    if (c.state) row.dataset.state = c.state;
+
+    const mark = el("span", "mark");
+    if (c.pk) { mark.className = "mark pk"; mark.textContent = "◆"; }
+    else if (c.fk) { mark.className = "mark fk"; mark.textContent = "→"; }
+
+    const name = el("span", "cname"); name.textContent = c.name;
+    const type = el("span", "ctype"); type.textContent = c.type || (c.fk ? c.fk.table : "");
+
+    row.title =
+      `${c.name} ${c.type || "(no declared type)"}` +
+      `${c.pk ? " · primary key" : ""}${c.notNull ? " · not null" : " · nullable"}` +
+      `${c.fk ? ` · → ${c.fk.table}.${c.fk.column ?? "(primary key)"}` : ""}` +
+      `${c.was ? `\nwas: ${c.was.type || "(no type)"}${c.was.notNull ? " not null" : ""}${c.was.fk ? ` → ${c.was.fk.table}` : ""}` : ""}` +
+      `\nclick to open this column in the grid`;
+
+    row.addEventListener("click", (event) => {
+      event.stopPropagation();
+      if (t.removed) return toast(`${t.name} is not in this database — it only exists in ${S.compareWith}`, true);
+      showColumn(t.name, c.name, "data");
+    });
+
+    row.append(mark, name, type);
+    body.append(row);
+  }
+  box.append(head, body);
+
+  if (t.indexes.length || t.keys.length) {
+    const foot = el("div", "foot");
+    for (const index of t.indexes) {
+      const p = el("p");
+      const label =
+        `${index.unique ? "unique " : "index "}(${index.columns.join(", ")})` +
+        `${index.where ? " where " + index.where.replace(/\s+/g, " ").trim() : ""}`;
+      p.textContent = label;
+      p.className = index.origin === "constraint" ? "c" : index.unique ? "u" : "";
+      p.title = `${index.name} — ${label}${index.origin === "constraint" ? "\nbuilt by a constraint; it has no CREATE INDEX of its own" : ""}`;
+      foot.append(p);
+    }
+    if (t.keys.length) {
+      const p = el("p", "k");
+      p.textContent = "keys: " + t.keys.join(", ");
+      p.title = `the ${t.keys.length} primary keys actually in this table — real rows, not parsed INSERTs`;
+      foot.append(p);
+    }
+    box.append(foot);
+  }
+
+  return box;
+}
+
+function paintCounts(tables) {
+  const drawn = tables.filter((t) => !t.removed);
+  const columns = drawn.reduce((a, t) => a + t.columns.length, 0);
+  const fks = drawn.reduce((a, t) => a + t.columns.filter((c) => c.fk).length, 0);
+  const indexes = drawn.reduce((a, t) => a + t.indexes.length, 0);
+  const empty = drawn.filter((t) => t.type === "table" && t.count === 0).length;
+  const rows = drawn.reduce((a, t) => a + (t.count || 0), 0);
+
+  const parts = [
+    `<b>${drawn.length}</b> ${drawn.length === 1 ? "object" : "objects"}`,
+    `<b>${columns}</b> ${columns === 1 ? "column" : "columns"}`,
+    `<b>${fks}</b> ${fks === 1 ? "foreign key" : "foreign keys"}`,
+    `<b>${indexes}</b> ${indexes === 1 ? "index" : "indexes"}`,
+    `<b>${rows.toLocaleString()}</b> ${rows === 1 ? "row" : "rows"}${empty ? ` · <b>${empty}</b> empty` : ""}`,
+  ];
+
+  if (S.compareWith) {
+    const added = tables.filter((t) => t.state === "added").length;
+    const removed = tables.filter((t) => t.state === "removed").length;
+    const changed = tables.filter((t) => t.state === "changed").length;
+    parts.push(`vs <b>${S.compareWith}</b>: +${added} / −${removed} / ~${changed}`);
+  }
+  $("#mapcounts").innerHTML = parts.join(" &middot; ");
+}
+
+/* --- camera ------------------------------------------------------------- */
+
+function applyCamera() {
+  world.style.transform = `translate(${camera.x}px, ${camera.y}px) scale(${camera.k})`;
+  stage.style.setProperty("--grid-size", 24 * camera.k + "px");
+  stage.style.setProperty("--grid-x", camera.x + "px");
+  stage.style.setProperty("--grid-y", camera.y + "px");
+}
+
+function fit() {
+  if (!mapModel) return;
+  const r = stage.getBoundingClientRect();
+  // The pane is display:none until the tab is opened, so its box is 0×0 and a
+  // fit computed then would divide by zero and blank the drawing.
+  if (r.width < 2 || r.height < 2) return;
+  const padding = 28;
+  const k = Math.min((r.width - padding * 2) / mapModel.box.width, (r.height - padding * 2) / mapModel.box.height, 1.5);
+  camera.k = Math.max(k, 0.08);
+  camera.x = (r.width - mapModel.box.width * camera.k) / 2;
+  camera.y = (r.height - mapModel.box.height * camera.k) / 2;
+  applyCamera();
+}
+
+stage.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const r = stage.getBoundingClientRect();
+  const px = e.clientX - r.left;
+  const py = e.clientY - r.top;
+  if (e.ctrlKey || e.metaKey) {
+    const next = Math.min(3, Math.max(0.08, camera.k * Math.exp(-e.deltaY * 0.01)));
+    camera.x = px - (px - camera.x) * (next / camera.k);
+    camera.y = py - (py - camera.y) * (next / camera.k);
+    camera.k = next;
+  } else {
+    camera.x -= e.deltaX;
+    camera.y -= e.deltaY;
+  }
+  applyCamera();
+}, { passive: false });
+
+let pan = null;
+stage.addEventListener("pointerdown", (e) => {
+  const head = e.target.closest(".node header");
+  if (head) {
+    const box = head.parentElement;
+    const t = mapModel.box.byName.get(box.dataset.table.toLowerCase());
+    const start = { x: e.clientX, y: e.clientY, tx: t.x, ty: t.y, moved: false };
+    box.setPointerCapture(e.pointerId);
+    const move = (ev) => {
+      if (Math.abs(ev.clientX - start.x) > 3 || Math.abs(ev.clientY - start.y) > 3) start.moved = true;
+      t.x = start.tx + (ev.clientX - start.x) / camera.k;
+      t.y = start.ty + (ev.clientY - start.y) / camera.k;
+      box.style.left = t.x + "px";
+      box.style.top = t.y + "px";
+      redrawEdges();
+    };
+    const up = () => {
+      box.removeEventListener("pointermove", move);
+      box.removeEventListener("pointerup", up);
+      // A drag is not a click. Opening the grid every time you tidied the
+      // layout would make the drawing unusable as a drawing.
+      if (!start.moved) openFromMap(t);
+    };
+    box.addEventListener("pointermove", move);
+    box.addEventListener("pointerup", up);
+    e.preventDefault();
+    return;
+  }
+  if (e.target.closest(".node")) return;
+  pan = { x: e.clientX, y: e.clientY, vx: camera.x, vy: camera.y };
+  stage.classList.add("panning");
+  stage.setPointerCapture(e.pointerId);
+});
+stage.addEventListener("pointermove", (e) => {
+  if (!pan) return;
+  camera.x = pan.vx + (e.clientX - pan.x);
+  camera.y = pan.vy + (e.clientY - pan.y);
+  applyCamera();
+});
+stage.addEventListener("pointerup", () => {
+  pan = null;
+  stage.classList.remove("panning");
+});
+
+function redrawEdges() {
+  if (!mapModel) return;
+  for (const edge of mapModel.edges) {
+    const parent = mapModel.box.byName.get(edge.from.toLowerCase());
+    const child = mapModel.box.byName.get(edge.to.toLowerCase());
+    if (!parent || !child) continue;
+    const d = edgePath(parent, child, edge.column);
+    edge.el.setAttribute("d", d);
+    edge.hit.setAttribute("d", d);
+  }
+}
+
+/* --- from the map into the console -------------------------------------- */
+
+/** THE JOIN. The map's whole claim to being an index rather than a decoration. */
+function openFromMap(t) {
+  if (t.removed) return toast(`${t.name} is not in this database — it only exists in ${S.compareWith}`, true);
+  load(t.name);
+}
+
+function joinFor(parentTable, parentColumn, childTable, childColumn) {
+  const sql =
+    `SELECT child.*\n` +
+    `FROM ${qi(childTable)} child\n` +
+    `JOIN ${qi(parentTable)} parent ON parent.${qi(parentColumn)} = child.${qi(childColumn)}\n` +
+    `LIMIT 50`;
+  $("#sql").value = sql;
+  paintQuery();
+  setView("query");
+  toast(`${childTable}.${childColumn} → ${parentTable}.${parentColumn}  —  ⌘↵ to run`);
+}
+
+/* --- isolation ---------------------------------------------------------- */
+
+function isolate(name) {
+  if (!mapModel) return;
+  stage.classList.add("isolating");
+  const kin = new Set([name]);
+  for (const edge of mapModel.edges) {
+    const on = edge.from === name || edge.to === name;
+    edge.el.classList.toggle("lit", on);
+    if (on) { kin.add(edge.from); kin.add(edge.to); }
+  }
+  for (const box of nodes.children) {
+    box.classList.toggle("lit", kin.has(box.dataset.table));
+    box.classList.toggle("origin", box.dataset.table === name);
+  }
+}
+
+function clearIsolation() {
+  stage.classList.remove("isolating");
+  for (const box of nodes.children) box.classList.remove("lit", "origin");
+  if (mapModel) for (const edge of mapModel.edges) edge.el.classList.remove("lit");
+}
+
+nodes.addEventListener("pointerover", (e) => {
+  const box = e.target.closest(".node");
+  if (box) isolate(box.dataset.table);
+});
+nodes.addEventListener("pointerout", (e) => {
+  if (!e.relatedTarget || !e.relatedTarget.closest || !e.relatedTarget.closest(".node")) clearIsolation();
+});
+
+/* --- integrity ---------------------------------------------------------- */
+
+/**
+ * PRAGMA foreign_key_check, drawn on the edge it broke.
+ *
+ * NEITHER prototype this replaces could do this. schema-viz-v2 has the picture
+ * and no data; sql-console-v2 has the data and no picture. Integrity is a
+ * property of rows, so only the combination can point at the line.
+ */
+async function checkForeignKeys(quiet = false) {
+  if (!S.id) return;
+  if (!quiet) toast("PRAGMA foreign_key_check…");
+  let data;
+  try {
+    data = await (await fetch(withDb("/api/fkcheck"))).json();
+  } catch (error) {
+    return toast(String(error.message || error), true);
+  }
+  if (data.error) return toast(data.error, true);
+
+  violations = data.violations ?? [];
+  checkedFor = S.id;
+  applyViolations();
+  if (quiet && !violations.length) return;
+  toast(
+    violations.length
+      ? `${plural(violations.length, "broken foreign key", "broken foreign keys")} — drawn in red`
+      : "no orphan rows — every foreign key resolves",
+    violations.length > 0,
+  );
+}
+
+/**
+ * Check automatically when the database is small enough that it costs nothing.
+ *
+ * `foreign_key_check` is a scan per foreign key, so on a real database it is a
+ * button. On a schema you just pasted it is instant, and a broken reference you
+ * have to know to go looking for is a broken reference you will not find.
+ */
+const AUTO_CHECK_ROWS = 50_000;
+let checkedFor = null;
+
+function maybeAutoCheck(tables) {
+  if (checkedFor === S.id) return;
+  const rows = tables.filter((t) => !t.removed).reduce((a, t) => a + (t.count || 0), 0);
+  if (rows > AUTO_CHECK_ROWS) {
+    $("#mapfk").textContent = `${rows.toLocaleString()} rows — press CHECK FKS to scan for orphans`;
+    return;
+  }
+  checkForeignKeys(true);
+}
+
+function applyViolations() {
+  if (!mapModel) return;
+  const broken = new Map(violations.map((v) => [`${v.table}.${v.column}`.toLowerCase(), v]));
+  for (const edge of mapModel.edges) {
+    const hit = broken.get(`${edge.to}.${edge.column}`.toLowerCase());
+    edge.el.classList.toggle("violated", Boolean(hit));
+    if (hit) {
+      edge.hit.firstChild.textContent =
+        `${edge.to}.${edge.column} → ${edge.from}.${edge.parentColumn}\n` +
+        `${plural(hit.rows, "orphan row", "orphan rows")} — no such parent (example rowid ${hit.example})\n` +
+        `click for the join`;
+    }
+  }
+  const label = $("#mapfk");
+  if (!violations.length) { label.textContent = ""; label.className = ""; return; }
+  label.className = "bad";
+  label.textContent =
+    `${plural(violations.length, "broken foreign key", "broken foreign keys")}: ` +
+    violations.map((v) => `${v.table}.${v.column} (${v.rows})`).join(", ");
+}
+
+/* --- diff --------------------------------------------------------------- */
+
+const schemaCache = new Map();
+async function fetchSchemaOf(id) {
+  if (schemaCache.has(id)) return schemaCache.get(id);
+  try {
+    const response = await fetch(`/api/schema?db=${encodeURIComponent(id)}`);
+    const data = await response.json();
+    if (!response.ok || data.error) { toast(`${id}: ${data.error ?? response.status}`, true); return null; }
+    schemaCache.set(id, data);
+    return data;
+  } catch (error) {
+    toast(`${id}: ${error.message}`, true);
+    return null;
+  }
+}
+
+const fkKey = (c) => (c.fk ? `${c.fk.table}.${c.fk.column ?? ""}`.toLowerCase() : "");
+
+/**
+ * Draw MINE, annotated against THEIRS.
+ *
+ * Tables that only exist in theirs are kept as ghosts rather than dropped —
+ * "what did V7 remove" is exactly as interesting as "what did V7 add", and a
+ * diff that can only show additions is half a diff.
+ */
+function diffTables(mine, theirs) {
+  const theirsBy = new Map(theirs.map((t) => [t.name.toLowerCase(), t]));
+  const mineBy = new Map(mine.map((t) => [t.name.toLowerCase(), t]));
+  const out = [];
+
+  for (const t of mine) {
+    const other = theirsBy.get(t.name.toLowerCase());
+    if (!other) {
+      out.push({ ...t, state: "added", columns: t.columns.map((c) => ({ ...c, state: "added" })) });
+      continue;
+    }
+    const otherColumns = new Map(other.columns.map((c) => [c.name.toLowerCase(), c]));
+    const columns = t.columns.map((c) => {
+      const was = otherColumns.get(c.name.toLowerCase());
+      if (!was) return { ...c, state: "added" };
+      const changed =
+        (was.type || "") !== (c.type || "") || was.notNull !== c.notNull || was.pk !== c.pk || fkKey(was) !== fkKey(c);
+      return { ...c, state: changed ? "changed" : "same", was: changed ? was : null };
+    });
+    for (const was of other.columns) {
+      if (!t.columns.some((c) => c.name.toLowerCase() === was.name.toLowerCase())) {
+        columns.push({ ...was, state: "removed", fk: null });
+      }
+    }
+    out.push({ ...t, columns, state: columns.some((c) => c.state !== "same") ? "changed" : "same" });
+  }
+
+  for (const t of theirs) {
+    if (mineBy.has(t.name.toLowerCase())) continue;
+    out.push({
+      ...t,
+      state:   "removed",
+      removed: true,
+      // A ghost's outbound edges would point into a schema that is not on
+      // screen. Its own box still lists them, marked; the lines are dropped.
+      columns: t.columns.map((c) => ({ ...c, state: "removed", fk: null })),
+    });
+  }
+  return out;
+}
+
+function renderCompare() {
+  const select = $("#cmp");
+  select.innerHTML = "";
+  const none = el("option");
+  none.value = "";
+  none.textContent = "— nothing —";
+  select.append(none);
+  for (const entry of S.dbs) {
+    if (entry.id === S.id || entry.status === "gone") continue;
+    const option = el("option");
+    option.value = entry.id;
+    option.textContent = entry.id;
+    select.append(option);
+  }
+  select.value = S.compareWith ?? "";
+}
+
+$("#cmp").onchange = async (event) => {
+  S.compareWith = event.target.value || null;
+  mapDirty = true;
+  stampUrl();
+  await drawMap();
+};
+
+$("#check").onclick = checkForeignKeys;
+$("#fit").onclick = fit;
+$("#wide").onclick = toggleWide;
+
+function toggleWide() {
+  const app = $("#app");
+  app.dataset.wide = app.dataset.wide === "1" ? "0" : "1";
+  // The pane changed size, so the fitted camera is stale by exactly the rail.
+  // Direct, not rAF — see setView(): rAF never fires in an unpainted tab.
+  fit();
+}
+
+// ===========================================================================
+// GESTURE 1 — paste.
+// ===========================================================================
+function openPasteSheet(seed = "") {
+  $("#pasteerr").textContent = "";
+  if (seed) $("#pastesql").value = seed;
+  $("#veil").dataset.on = "1";
+  $("#pastesql").focus();
+}
+const closePasteSheet = () => { $("#veil").dataset.on = "0"; };
+
+async function buildFromSql(sql, label) {
+  toast("compiling…");
+  let data;
+  try {
+    const response = await fetch("/api/open/paste", { method: "POST", body: JSON.stringify({ sql, label }) });
+    data = await response.json();
+  } catch (error) {
+    $("#pasteerr").textContent = error.message;
+    return toast(error.message, true);
+  }
+  if (data.error) {
+    $("#pasteerr").textContent = data.error;
+    return toast(data.error, true);
+  }
+
+  await loadDbs();
+  closePasteSheet();
+  $("#pastesql").value = "";
+  await switchTo(data.entry.id);
+
+  // A schema that did not compile is registered, not hidden: the entry carries
+  // the SQLite error and loadSchema() has already given it the whole pane. Do
+  // not paper over it with a cheerful toast.
+  if (data.entry.buildError) return toast(data.entry.buildError, true);
+  setView("map");
+  toast(`${data.entry.statements} statements · ?db=${data.entry.id}`);
+}
+
+$("#pastebtn").onclick = () => openPasteSheet();
+$("#pastecancel").onclick = closePasteSheet;
+$("#pastego").onclick = () => {
+  const sql = $("#pastesql").value.trim();
+  if (!sql) { $("#pasteerr").textContent = "Nothing to build — paste some SQL first."; return; }
+  buildFromSql(sql, "pasted");
+};
+$("#veil").onclick = (event) => { if (event.target.id === "veil") closePasteSheet(); };
+
+/**
+ * Paste ANYWHERE and it builds. This is the gesture, not a shortcut for it —
+ * the sheet exists for when you want to look at the text first.
+ *
+ * Typing into a textarea or input is exempt, so the query editor and the sheet
+ * itself behave like ordinary fields.
+ */
+window.addEventListener("paste", (event) => {
+  const target = event.target;
+  if (target && /^(TEXTAREA|INPUT)$/.test(target.tagName)) return;
+  const text = event.clipboardData?.getData("text");
+  if (!text || !text.trim()) return;
+  // Something that is obviously not DDL is far more likely to be a stray copy
+  // than a schema. Open the sheet with it rather than compiling a paragraph.
+  if (!/\bCREATE\s+(TABLE|VIEW|INDEX|TRIGGER)\b/i.test(text)) {
+    event.preventDefault();
+    return openPasteSheet(text);
+  }
+  event.preventDefault();
+  buildFromSql(text, "pasted");
+});
+
+// ===========================================================================
+// GESTURE 2 — drop. A file, several files, or a whole folder.
+//
+// The drop target is the WHOLE WINDOW, and it is armed by the drag itself. A
+// drop zone you have to aim at is a drop zone you miss.
+// ===========================================================================
+let dragDepth = 0;
+window.addEventListener("dragenter", (event) => {
+  if (![...event.dataTransfer.types].includes("Files")) return;
+  event.preventDefault();
+  dragDepth += 1;
+  $("#drop").dataset.on = "1";
+});
+window.addEventListener("dragover", (event) => {
+  if (![...event.dataTransfer.types].includes("Files")) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "copy";
+});
+window.addEventListener("dragleave", () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (!dragDepth) $("#drop").dataset.on = "0";
+});
+
+const readEntries = (reader) => new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+const fileOf = (entry) => new Promise((resolve, reject) => entry.file(resolve, reject));
+
+/** readEntries() returns a PAGE at a time, not the whole directory. Loop or lose files. */
+async function listDirectory(entry) {
+  const reader = entry.createReader();
+  const out = [];
+  for (;;) {
+    const batch = await readEntries(reader);
+    if (!batch.length) return out;
+    out.push(...batch);
+  }
+}
+
+window.addEventListener("drop", async (event) => {
+  event.preventDefault();
+  dragDepth = 0;
+  $("#drop").dataset.on = "0";
+  const transfer = event.dataTransfer;
+  if (!transfer) return;
+
+  // webkitGetAsEntry() must be called SYNCHRONOUSLY, before any await — the
+  // DataTransfer is emptied the moment the event handler yields.
+  const entries = [...transfer.items].map((item) => item.webkitGetAsEntry?.() ?? null);
+  const files = [...transfer.files];
+
+  const directories = entries.filter((entry) => entry?.isDirectory);
+  if (directories.length) {
+    for (const directory of directories) await uploadDirectory(directory);
+    return;
+  }
+
+  // Several .sql files dropped together are one schema in the order of their
+  // names — the same thing as dropping the folder that holds them.
+  const sqls = files.filter((file) => file.name.toLowerCase().endsWith(".sql"));
+  if (sqls.length > 1) {
+    const parts = await Promise.all(sqls.map(async (file) => ({ name: file.name, text: await file.text() })));
+    return uploadBundle("dropped-schema", parts);
+  }
+
+  for (const file of files) await upload(file);
+});
+
+async function uploadDirectory(entry) {
+  toast(`reading ${entry.name}/…`);
+  let children;
+  try {
+    children = await listDirectory(entry);
+  } catch (error) {
+    return toast(`${entry.name}: ${error.message}`, true);
+  }
+  const sqls = children.filter((child) => child.isFile && child.name.toLowerCase().endsWith(".sql"));
+  if (!sqls.length) return toast(`${entry.name}/ has no .sql files in it`, true);
+
+  const parts = [];
+  for (const child of sqls) {
+    const file = await fileOf(child);
+    parts.push({ name: child.name, text: await file.text() });
+  }
+  await uploadBundle(entry.name, parts);
+}
+
+async function uploadBundle(name, parts) {
+  const order = [...parts].sort((a, b) => a.name.localeCompare(b.name)).map((p) => p.name);
+  toast(`${name}: ${order.join(" → ")}`);
+  let data;
+  try {
+    const response = await fetch("/api/open/bundle", { method: "POST", body: JSON.stringify({ name, files: parts }) });
+    data = await response.json();
+  } catch (error) {
+    return toast(`${name}: ${error.message}`, true);
+  }
+  if (data.error) return toast(`${name}: ${data.error}`, true);
+
+  await loadDbs();
+  await switchTo(data.entry.id);
+  if (data.entry.buildError) return toast(data.entry.buildError, true);
+  setView("map");
+  toast(`${name} → ?db=${data.entry.id} · ${plural(parts.length, "file", "files")}, ${data.entry.statements} statements`);
+}
+
+async function upload(file) {
+  toast(`opening ${file.name}…`);
+  let data;
+  try {
+    const response = await fetch("/api/open/upload", {
+      method:  "POST",
+      // Raw bytes with the name in a header: multipart would mean writing a
+      // multipart parser. encodeURIComponent because a header must be latin-1.
+      headers: { "x-sql-filename": encodeURIComponent(file.name), "content-type": "application/octet-stream" },
+      body:    file,
+    });
+    data = await response.json();
+  } catch (error) {
+    return toast(`${file.name}: ${error.message}`, true);
+  }
+  if (data.error) return toast(`${file.name}: ${data.error}`, true);
+
+  await loadDbs();
+  toast(`${file.name} → ?db=${data.entry.id}`);
+  await switchTo(data.entry.id);
+  if (data.entry.buildError) return toast(data.entry.buildError, true);
+  if (data.entry.kind === "schema") setView("map");
+}
+
+// ===========================================================================
+// Download and clone
+// ===========================================================================
+$("#download").onclick = () => {
+  if (!S.id) return;
+  // A plain navigation, so the browser's own download machinery handles the
+  // stream and the filename. The server takes the copy with the backup API
+  // before a single byte goes out; see /api/download in server.js.
+  toast("taking a consistent copy via the backup API…");
+  location.href = `/api/download/${encodeURIComponent(S.id)}`;
+};
+
+$("#clone").onclick = async () => {
+  if (!S.id) return;
+  toast("cloning…");
+  const data = await (await fetch(`/api/clone/${encodeURIComponent(S.id)}`, { method: "POST" })).json();
+  if (data.error) return toast(data.error, true);
+  await loadDbs();
+  toast(`cloned → ?db=${data.entry.id} (${data.entry.clone.pages} pages)`);
+  await switchTo(data.entry.id);
+};
+
+// ===========================================================================
+// Theme
+//
+// Two palettes, one set of token names — see the top of the stylesheet. The
+// only state is which one, and it is remembered.
+//
+// DELIBERATELY NOT `prefers-color-scheme`. A setting that silently changes
+// because the OS crossed sunset is a setting you cannot rely on, and this repo's
+// rule is explicit over implicit. To follow the OS instead, this function is the
+// one line to change:
+//   const preferredTheme = () => matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+// ===========================================================================
+const THEME_KEY = "sqlite-viewer:theme";
+const preferredTheme = () => "dark";
+
+const themeNow = () => (document.documentElement.dataset.theme === "light" ? "light" : "dark");
+
+function setTheme(theme, remember = true) {
+  const next = theme === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  // The button names what you will GET, not what you are in — a control that
+  // reads "dark" while the screen is already dark is a coin toss.
+  $("#theme").textContent = next === "light" ? "◑ dark" : "◐ light";
+  $("#theme").title = `switch to ${next === "light" ? "dark" : "light"} mode (t)`;
+  if (remember) { try { localStorage.setItem(THEME_KEY, next); } catch { /* private mode */ } }
+
+  // The map's edges are SVG strokes painted from a token at DRAW time, and the
+  // node boxes carry an inline shadow — neither re-reads a variable on its own,
+  // so the drawing has to be repainted. Cheap: the model is already built.
+  if (S.view === "map" && mapModel) { mapDirty = true; drawMap(); }
+}
+
+// The head script already applied the stored value before first paint; this
+// only syncs the button label with it.
+setTheme(themeNow(), false);
+$("#theme").onclick = () => setTheme(themeNow() === "light" ? "dark" : "light");
+
+// ===========================================================================
+// Views + keys
+// ===========================================================================
+function setView(view) {
+  if (S.blocked) return;
+  S.view = view;
+  document.querySelectorAll("#bar .tab").forEach((t) => { t.dataset.on = t.dataset.view === view ? "1" : "0"; });
+  $("#q").dataset.on   = view === "query" ? "1" : "0";
+  $("#ddl").dataset.on = view === "ddl" ? "1" : "0";
+  $("#map").dataset.on = view === "map" ? "1" : "0";
+  $("#scroll").style.display = view === "ddl" || view === "map" ? "none" : "block";
+  stampUrl();
+  if (view === "query") $("#sql").focus();
+  if (view === "map") {
+    renderCompare();
+    // DIRECTLY, not inside requestAnimationFrame.
+    //
+    // The pane has no box while it is hidden, so this used to wait a frame
+    // before measuring. But a browser does not run rAF callbacks in a tab that
+    // is not being painted — a background tab, or a window behind another one —
+    // so opening the map there left it PERMANENTLY BLANK, with no error and a
+    // model that never got built. Measured: rAF fired 0 times.
+    //
+    // Waiting is not needed anyway: the `display` change above is applied
+    // synchronously, and `getBoundingClientRect()` inside fit() forces the
+    // layout, so the box is already correct on the next statement.
+    drawMap();
+  }
+}
+
+document.querySelectorAll("#bar .tab").forEach((t) => { t.onclick = () => setView(t.dataset.view); });
+$("#run").onclick = runQuery;
+$("#prev").onclick = () => load(S.table, Math.max(0, S.offset - S.limit));
+$("#next").onclick = () => load(S.table, S.offset + S.limit);
+$("#dbbutton").onclick = openPicker;
+$("#picker").onclick = (event) => { if (event.target.id === "picker") closePicker(); };
+
+// ===========================================================================
+// Query
+// ===========================================================================
+async function runQuery() {
+  const sql = $("#sql").value.trim();
+  if (!sql || !S.id) return;
+  $("#qmsg").textContent = "running…";
+
+  const res = await fetch(withDb("/api/query"), { method: "POST", body: JSON.stringify({ sql }) });
+  const data = await res.json();
+
+  if (data.error) {
+    $("#qmsg").textContent = data.error;
+    $("#qmsg").style.color = "var(--rose)";
+    return;
+  }
+  $("#qmsg").style.color = "";
+  $("#qmsg").textContent = `${data.rows.length} rows · ${data.ms.toFixed(2)} ms${data.truncated ? " · TRUNCATED" : ""}`;
+
+  S.columns = data.columns;
+  S.rows = data.rows;
+  S.count = data.rows.length;
+  S.orderBy = null;
+  draw();
+  $("#st-name").textContent = "query";
+  $("#st-rows").textContent = `${data.rows.length} rows`;
+  S.offset = 0;
+  page();
+  $("#st-time").textContent = `${data.ms.toFixed(2)} ms`;
+  $("#st-time").className = "live";
+  // The query pane keeps the editor visible above the grid, so seeing the
+  // result does not mean losing the statement that produced it.
+  $("#scroll").style.display = "block";
+}
+
+$("#sql").addEventListener("keydown", (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); runQuery(); }
+});
+
+// Keep the highlight layer in lockstep with the textarea. The trailing newline
+// matters: without it a final empty line collapses and the two layers end up one
+// row out of alignment.
+function paintQuery() {
+  $("#sqlhl").innerHTML = highlightSql($("#sql").value + "\n");
+  const ta = $("#sql");
+  ta.style.height = "auto";
+  ta.style.height = Math.min(ta.scrollHeight, Math.round(window.innerHeight * 0.45)) + "px";
+}
+$("#sql").addEventListener("input", paintQuery);
+$("#sql").addEventListener("scroll", () => {
+  $("#sqlhl").scrollTop = $("#sql").scrollTop;
+  $("#sqlhl").scrollLeft = $("#sql").scrollLeft;
+});
+paintQuery();
+
+document.addEventListener("keydown", (e) => {
+  const typing = /^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName);
+  if (!typing) {
+    if (e.key === "d") { e.preventDefault(); $("#picker").dataset.on === "1" ? closePicker() : openPicker(); }
+    if (e.key === "m") { e.preventDefault(); setView("map"); }
+    if (e.key === "p") { e.preventDefault(); openPasteSheet(); }
+    if (e.key === "t") { e.preventDefault(); setTheme(themeNow() === "light" ? "dark" : "light"); }
+    if (e.key === "/") { e.preventDefault(); setView("query"); }
+    if (S.view === "map") {
+      if (e.key === "f") { e.preventDefault(); fit(); }
+      if (e.key === "w") { e.preventDefault(); toggleWide(); }
+    }
+  }
+  if (e.key === "Escape") {
+    if ($("#veil").dataset.on === "1") return closePasteSheet();
+    if ($("#picker").dataset.on === "1") return closePicker();
+    // Escape clears the highlight and LEAVES YOU WHERE YOU ARE. Dropping the
+    // highlight and the view together punished you twice for one keystroke.
+    if (S.focusColumn) {
+      S.focusColumn = null;
+      draw();
+      drawDDL();
+      document.querySelectorAll(".col").forEach((c) => { c.dataset.on = "0"; });
+      return;
+    }
+    if (S.view === "map" && $("#app").dataset.wide === "1") return toggleWide();
+    setView("data");
+    document.activeElement.blur();
+  }
+});
+
+window.addEventListener("resize", () => { if (S.view === "map") fit(); });
+
+boot();
+</script>
+</body>
+</html>
