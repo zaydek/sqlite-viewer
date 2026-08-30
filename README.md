@@ -32,6 +32,20 @@ the refusal is the answer, with the engine's message. That is what gives you:
 - `PRAGMA foreign_key_check`, drawn in red on the exact edge it broke.
 - **Diff two schemas** — open both and compare their maps.
 
+## Three ways to point it at a database
+
+| You have | Run | Proven by |
+|---|---|---|
+| a `.db` file on disk | `node server.js path/to.db` | `node prove.mjs` |
+| just SQL, no database (in-memory-style) | `node server.js --schema schema.sql` or paste / drop SQL onto the page — SQLite compiles it into a throwaway database under the workspace | `node prove.mjs` |
+| a database on a **Fly.io** volume | `node server.js --fly APP:/data/app.db --fly-mode real` — needs `flyctl` on PATH and `fly auth login` | `FLY_TARGET=APP:/data/app.db node prove-fly.mjs` |
+
+`prove.mjs` runs the Fly code path against a stand-in `fly` binary so it never
+touches production. `prove-fly.mjs` runs the real `flyctl` against **your** app,
+snapshots the database over SFTP into a temp workspace, integrity-checks it,
+lists tables and reads rows — the end-to-end receipt for your own setup. It is
+read-only on the remote and refuses to run without `FLY_TARGET`.
+
 ## Run it
 
 ```sh
@@ -42,7 +56,8 @@ node server.js --schema schema.sql              # a single file
 node server.js --schema v1/ --schema v2/        # two, to diff them
 node server.js --fly APP:/data/app.db --fly-mode real   # snapshot a Fly.io volume (needs flyctl)
 node server.js --help
-node prove.mjs                                  # the test suite: 139 assertions
+node prove.mjs                                  # the test suite: 139 assertions, no network
+FLY_TARGET=APP:/data/app.db node prove-fly.mjs # live proof against your Fly app
 ```
 
 **It never writes to a database you point it at.** Every handle is opened
@@ -92,7 +107,8 @@ lib/
   registry.js    many databases: the manifest, ids, builds, directories, paste
   fly.js         Fly.io snapshot fetch — real and mock, neither a default
 ui/console.html  the whole frontend, inlined: grid, ddl, map, query
-prove.mjs        the test suite — spawns real servers against hostile fixtures
+prove.mjs        the test suite — spawns real servers against hostile fixtures, no network
+prove-fly.mjs    opt-in live proof against a real Fly.io app (FLY_TARGET=app:/path)
 ```
 
 MIT.

@@ -4,7 +4,7 @@
   "description": "Browse any SQLite database in a browser: rows, DDL, a foreign-key map, a read-only query editor. Zero dependencies.",
   "type": "module",
   "bin": { "sqlite-viewer": "./server.js" },
-  "scripts": { "start": "node --no-warnings server.js", "test": "node --no-warnings prove.mjs" },
+  "scripts": { "start": "node --no-warnings server.js", "test": "node --no-warnings prove.mjs", "test:fly": "node --no-warnings prove-fly.mjs" },
   "engines": { "node": ">=23.8.0" },
   "license": "MIT",
   "repository": { "type": "git", "url": "https://github.com/zaydek/sqlite-viewer" }
